@@ -1,24 +1,18 @@
-import io
 import json
 import logging
-import re
-import sys
+import math
 import time
-import traceback
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
-from urllib.error import HTTPError
-import urllib.parse
+from typing import Any, Dict
 
 import cv2
 import numpy as np
 from PIL import Image
 from websocket._core import WebSocket
 from websocket._exceptions import WebSocketTimeoutException
-
-from typing import Dict, Any, Union, Optional
-import math
 
 from .model_defs import ModelDef
 
@@ -351,146 +345,90 @@ class ComfyClient:
         #     log.error("- Is the uiapi plugin OK?")
         #     return None
 
-    def download_models(self, models: Dict[str, ModelDef]) -> Dict[str, Dict[str, Any]]:
+    def json_get(self, url, verbose=False) -> dict:
+        address = f'{self.server_address}{url}'
+        if not address.startswith('http'):
+            address = f'http://{address}'
+
+        log.debug(f"GET {address}")
+        req = urllib.request.Request(
+            address,
+            headers={'Content-Type': 'application/json'})
+
+        now = time.time()
+        with urllib.request.urlopen(req) as response:
+            log.debug(f"RECV {response}")
+            ret = json.loads(response.read())
+        elapsed_seconds = time.time() - now
+
+        if verbose:
+            log.info(f"GET {url} -> {ret} (took {elapsed_seconds:.2f}s)")
+        return ret
+
+    def download_models(self, models: Dict[str, ModelDef], timeout: int = 300) -> Dict[str, Dict[str, Any]]:
         """
         Download models specified in the models dictionary.
-        
-        Args:
-            models: A dictionary mapping model filenames to their ModelDef objects.
-                Example:
-                {
-                    "model1.safetensors": ModelDef(
-                        huggingface="org/repo/model1.safetensors",
-                        fp16=True
-                    ),
-                    "model2.ckpt": ModelDef(
-                        civitai="https://civitai.com/models/..."
-                    )
-                }
-        
-        Returns:
-            A dictionary containing the download results for each model:
-            {
-                "model1.safetensors": {
-                    "status": "success",
-                    "path": "/path/to/downloaded/model"
-                },
-                "model2.ckpt": {
-                    "status": "error",
-                    "error": "Error message"
-                }
-            }
         """
-        # Convert ModelDef objects to dictionaries
         download_table = {
             filename: model_def.to_dict() 
             for filename, model_def in models.items()
         }
         
-        response = self.json_post('/uiapi/download_models', {
-            "download_table": download_table
-        })
-        
-        if isinstance(response, dict) and 'downloads' in response:
-            return response['downloads']
-        else:
-            raise ValueError("Unexpected response format from server")
-
-
-RENDERVAR_FIELD_MAPPING = {
-    'prompt':     'prompt.text',
-    'chg':        'ksampler.denoise',
-    'steps':      'ksampler.steps',
-    'seed':       'ksampler.seed',
-    'cfg':        'ksampler.cfg',
-    'sampler':    'ksampler.sampler_name',
-    'img':        'img.image',
-    'promptneg':  'promptneg.text',
-    'ccg{}':      'ccg{}.strength',
-    'ccg':        'ccg{}.strength',
-    'guidance':   'cn_img{}.image',
-    'seed_chg':   'noise.chg',
-    'seed_grain': 'noise.grain',
-}
-
-RENDERVAR_CLAMP01_ARGS = ['chg']
-
-# def mapping(rv):
-#     return {
-#         'ksampler.cfg':          rv.cfg,
-#         'ksampler.steps':        rv.steps,
-#         'ksampler.seed':         rv.seed,
-#         'ksampler.denoise':      rv.chg,
-#         'ksampler.sampler_name': rv.sampler,
-#         'img':                   rv.img,
-#         'prompt':                rv.prompt
-#     }
-
-# def txt2img(**args):
-#     log.info("txt2img")
-#     hud(diffusion='txt2img')
-#     # args['chg'] = 0.925
-#     set_values(args)
-#     set('KSampler.positive', 1)
-#     sconnect("prompt", "ccg1.CONDITIONING")
-#     connect("ccg2.CONDITIONING", "ccg3.CONDITIONING")
-#     connect("ccg3.CONDITIONING", "KSampler.positive")
-#     return execute()
-
-
-# def img2img(**args):
-#     # TODO figure out if this unloads the controlnets (which we dont want, for max performance)
-#     log.info("img2img")
-#     hud(diffusion='img2img')
-#     set_values(args)
-#     connect("ConditioningAverage.CONDITIONING", "KSampler.positive")
-#     connect("prompt", "KSampler.positive")
-#     return execute()
-
-
-# def set_rv(rv: Any) -> None:
-#     set_values({field: getattr(rv, field) for field in RENDERVAR_FIELD_MAPPING.keys() if hasattr(rv, field)})
-
-
-# def set_values(args: Dict[str, Union[Any, tuple]]) -> None:
-#     batched_fields = []
-#     for arg, value in args.items():
-#         if not is_valid_value(value):
-#             log.warning(f"Skipping invalid value for {arg}: {value}")
-#             continue
-
-#         with_clamp = arg in RENDERVAR_CLAMP01_ARGS
-#         if with_clamp and not arg == 'cfg':  # TODO remove cfg
-#             value = clamp01(value)
-
-#         if arg in RENDERVAR_FIELD_MAPPING:
-#             fields = RENDERVAR_FIELD_MAPPING[arg]
-#             if isinstance(fields, str):
-#                 fields = [fields]
-
-#             for field in fields:
-#                 if '{' in field:
-#                     # Handle numbered fields
-#                     if isinstance(value, (tuple, list)):
-#                         # Handle tuple values
-#                         batched_fields.extend([
-#                             (field.format(i), tuple_value)
-#                             for i, tuple_value in enumerate(value, start=1)
-#                             if is_valid_value(tuple_value)
-#                         ])
-#                     else:
-#                         # Handle individual numbered fields
-#                         base_name = re.sub(r'\{.*?\}', '', arg)
-#                         numbered_args = [k for k in args if k.startswith(base_name) and k[len(base_name):].isdigit()]
-#                         batched_fields.extend([
-#                             (field.format(k[len(base_name):]), args[k])
-#                             for k in numbered_args
-#                             if is_valid_value(args[k])
-#                         ])
-#                 else:
-#                     # Handle non-numbered fields
-#                     batched_fields.append((field, value))
-
-#     # Send all fields in a single batch
-#     if batched_fields:
-#         set(batched_fields)
+        try:
+            # Start the download process
+            response = self.json_post('/uiapi/download_models', {
+                "download_table": download_table
+            })
+            
+            if not isinstance(response, dict) or 'task_id' not in response:
+                print(response)
+                raise ValueError("Unexpected response format from server")
+            
+            task_id = response['task_id']
+            start_time = time.time()
+            last_status_print = 0
+            
+            # Poll for completion
+            while True:
+                if time.time() - start_time > timeout:
+                    raise TimeoutError(f"Download timeout after {timeout} seconds")
+                
+                try:
+                    status_response = self.json_get(f'/uiapi/download_status/{task_id}')
+                    
+                    if not isinstance(status_response, dict):
+                        raise ValueError("Invalid status response format")
+                    
+                    current_time = time.time()
+                    # Print status update every 5 seconds
+                    if current_time - last_status_print >= 5:
+                        elapsed = status_response.get('elapsed_time', current_time - start_time)
+                        current = status_response.get('current_model', 0)
+                        total = status_response.get('total_models', 0)
+                        if total > 0:
+                            log.info(f"Download progress: {current}/{total} models "
+                                   f"({current/total*100:.1f}%) - "
+                                   f"Elapsed: {elapsed:.1f}s")
+                        last_status_print = current_time
+                    
+                    # Match the server's response structure
+                    if status_response.get('completed', False):
+                        elapsed = status_response.get('elapsed_time', time.time() - start_time)
+                        log.info(f"Downloads completed in {elapsed:.1f} seconds")
+                        return status_response.get('progress', {})
+                    
+                    # Log errors immediately
+                    if 'progress' in status_response:
+                        for model, info in status_response['progress'].items():
+                            if info['status'] == 'error':
+                                log.error(f"Error downloading {model}: {info.get('error', 'Unknown error')}")
+                    
+                except Exception as e:
+                    log.warning(f"Connection error while polling status: {e}")
+                
+                # Wait before next poll
+                time.sleep(2)
+                
+        except Exception as e:
+            log.error(f"Download process failed: {e}")
+            raise

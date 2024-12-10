@@ -98,38 +98,126 @@ class ModelDef:
 
         raise ValueError("No valid model path found")
 
-    def download_huggingface(self, path: str) -> str:
-        """Download model from Hugging Face and return local path"""
-        if not self.huggingface:
-            raise ValueError("No Hugging Face URL provided")
+    def _get_final_path(self, path: str) -> Path:
+        """Get the final path for the model and create parent directories"""
+        final_path = determine_model_path(self.ckpt_type, path)
+        os.makedirs(final_path.parent, exist_ok=True)
+        return final_path
+
+    def _log_download_start(self, source: str, url: str, final_path: Path):
+        """Log the start of a download operation"""
+        log.info(f"Downloading from {source}")
+        log.info(f"from: {url}")
+        log.info(f"to: {final_path}")
+
+    def _download_huggingface(self, final_path: Path) -> Path:
+        """Core HuggingFace download logic"""
+        assert self.huggingface is not None
+        assert self.huggingface_id is not None
+
+        if not any(self.huggingface.endswith(ext) for ext in ['.safetensors', '.bin', '.ckpt']):
+            raise ValueError("Only direct file links supported for HuggingFace downloads")
+
+        filename = self.huggingface.split('/')[-1]
+        downloaded_path = Path(hf_hub_download(self.huggingface_id, filename=filename)).resolve()
         
-        assert self.huggingface_id
+        log.info(f"Moving {downloaded_path} to {final_path.as_posix()}")
+        downloaded_path.rename(final_path)
+        return final_path
 
-        # Extract just the filename if it's a direct file link
-        if any(self.huggingface.endswith(ext) for ext in ['.safetensors', '.bin', '.ckpt']):
-            final_path = determine_model_path(self.ckpt_type, path)
+    def _download_civitai(self, final_path: Path) -> Path:
+        """Core CivitAI download logic"""
+        from . import civitai
+        assert self.civitai is not None
+        token = self.read_civitai_token()
+        
+        downloaded_path = civitai.download_file(
+            url=self.civitai,
+            output_file=final_path.as_posix(),
+            token=token
+        )
+        shutil.move(downloaded_path, final_path)
+        return final_path
 
-            log.info(f"Downloading from HuggingFace")
-            log.info(f"from: {self.huggingface}")
-            log.info(f"to: {final_path}")
+    def _download_gdrive(self, final_path: Path) -> Path:
+        """Core Google Drive download logic"""
+        # Extract file ID from Google Drive URL
+        assert self.gdrive is not None
+        file_id = None
+        if '/file/d/' in self.gdrive:
+            file_id = self.gdrive.split('/file/d/')[1].split('/')[0]
+        elif 'id=' in self.gdrive:
+            file_id = self.gdrive.split('id=')[1].split('&')[0]
+        
+        if not file_id:
+            raise ValueError("Could not extract Google Drive file ID from URL")
+        
+        # Download using gdown
+        url = f'https://drive.google.com/uc?id={file_id}'
+        downloaded_path = gdown.download(url, final_path.as_posix(), quiet=False)
+        
+        if downloaded_path is None:
+            raise RuntimeError("Failed to download file from Google Drive")
+        
+        return final_path
 
-            if has_model(self.ckpt_type, path):
-                log.info(f"Model already exists at {final_path}!")
-                return final_path.as_posix()
-
-            filename = self.huggingface.split('/')[-1]
-            downloaded_path = hf_hub_download(self.huggingface_id, filename=filename)
-            downloaded_path = Path(downloaded_path).resolve()
-
-            os.makedirs(final_path.parent, exist_ok=True)
-            log.info(f"Moving {Path(downloaded_path).resolve()} to {final_path.as_posix()}")
-
-            downloaded_path.rename(final_path)
-
+    def download(self, path: str, source: Optional[str] = None) -> str:
+        """
+        Download model from configured source and return local path.
+        
+        Args:
+            path: The path/name for the downloaded model
+            source: Optional source override ('civitai', 'huggingface', or 'gdrive')
+                   If not specified, tries sources in order: CivitAI -> HuggingFace -> Google Drive
+        
+        Returns:
+            str: Path where the model was saved
+        """
+        # Check if model already exists
+        final_path = self._get_final_path(path)
+        if has_model(self.ckpt_type, path):
+            log.info(f"Model {path} already exists at {final_path}!")
             return final_path.as_posix()
-        
-        raise ValueError("Only direct file links supported for HuggingFace downloads")
-    
+
+        try:
+            # Use specified source if provided
+            if source:
+                if source == 'civitai' and self.civitai:
+                    self._log_download_start("CivitAI", self.civitai, final_path)
+                    final_path = self._download_civitai(final_path)
+                elif source == 'huggingface' and self.huggingface:
+                    if not self.huggingface_id:
+                        raise ValueError("Invalid Hugging Face URL/ID")
+                    self._log_download_start("HuggingFace", self.huggingface, final_path)
+                    final_path = self._download_huggingface(final_path)
+                elif source == 'gdrive' and self.gdrive:
+                    self._log_download_start("Google Drive", self.gdrive, final_path)
+                    final_path = self._download_gdrive(final_path)
+                else:
+                    raise ValueError(f"Source '{source}' not available for this model")
+            
+            # Otherwise try sources in default order
+            else:
+                if self.civitai:
+                    self._log_download_start("CivitAI", self.civitai, final_path)
+                    final_path = self._download_civitai(final_path)
+                elif self.huggingface:
+                    if not self.huggingface_id:
+                        raise ValueError("Invalid Hugging Face URL/ID")
+                    self._log_download_start("HuggingFace", self.huggingface, final_path)
+                    final_path = self._download_huggingface(final_path)
+                elif self.gdrive:
+                    self._log_download_start("Google Drive", self.gdrive, final_path)
+                    final_path = self._download_gdrive(final_path)
+                else:
+                    raise ValueError("No valid model path found")
+
+        except Exception as e:
+            log.error(f"Error downloading model: {str(e)}")
+            raise
+
+        return final_path.as_posix()
+
     def read_civitai_token(self) -> Optional[str]:
         paths = [
             Path.home().joinpath('.civitai_token').resolve().as_posix(),
@@ -139,87 +227,6 @@ class ModelDef:
             if os.path.exists(path):
                 return open(path).read().strip()
         return None
-
-    def download_civitai(self, path: str) -> str:
-        """Download model from CivitAI and return local path"""
-        from . import civitai
-
-        if not self.civitai:
-            raise ValueError("No CivitAI URL provided")
-
-        # Download using CivitAI helper
-        try:
-            token = self.read_civitai_token()
-
-            final_path = determine_model_path(self.ckpt_type, path)
-            if has_model(self.ckpt_type, path):
-                log.info(f"Model already on disk!")
-                return final_path.as_posix()
-            
-            log.info(f"Downloading from CivitAI")
-            log.info(f"from: {self.civitai}")
-            log.info(f"to: {final_path}")
-            
-            # if has_model(self.ckpt_type(), path):
-            #     log.info(f"Model already on disk!")
-            #     return final_path.as_posix()
-
-            downloaded_path = civitai.download_file(url=self.civitai, 
-                                                    output_file=final_path.as_posix(), 
-                                                    token=token)
-
-            os.makedirs(final_path.parent, exist_ok=True)
-            shutil.move(downloaded_path, final_path)
-
-            return final_path.as_posix()
-        except Exception as e:
-            log.info(f"Error downloading from CivitAI: {str(e)}")
-            raise
-    
-    def download_gdrive(self, path: str) -> str:
-        """Download model from Google Drive and return local path"""
-        if not self.gdrive:
-            raise ValueError("No Google Drive URL provided")
-
-        final_path = determine_model_path(self.ckpt_type, path)
-        if has_model(self.ckpt_type, path):
-            log.info(f"Model already on disk!")
-            return final_path.as_posix()
-
-        log.info(f"Downloading from Google Drive")
-        log.info(f"from: {self.gdrive}")
-        log.info(f"to: {final_path}")
-
-        # Extract file ID from Google Drive URL
-        file_id = None
-        if '/file/d/' in self.gdrive:
-            file_id = self.gdrive.split('/file/d/')[1].split('/')[0]
-        elif 'id=' in self.gdrive:
-            file_id = self.gdrive.split('id=')[1].split('&')[0]
-        
-        if not file_id:
-            raise ValueError("Could not extract Google Drive file ID from URL")
-
-        os.makedirs(final_path.parent, exist_ok=True)
-        
-        # Download using gdown
-        url = f'https://drive.google.com/uc?id={file_id}'
-        downloaded_path = gdown.download(url, final_path.as_posix(), quiet=False)
-        
-        if downloaded_path is None:
-            raise RuntimeError("Failed to download file from Google Drive")
-
-        return final_path.as_posix()
-
-    def download(self, path: str):
-        if self.civitai:
-            return self.download_civitai(path)
-        elif self.huggingface:
-            return self.download_huggingface(path)
-        elif self.gdrive:
-            return self.download_gdrive(path)
-        else:
-            raise ValueError("No valid model path found")
 
 @dataclass
 class ControlNetDef(ModelDef):

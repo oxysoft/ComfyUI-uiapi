@@ -146,6 +146,8 @@ def download_file(url: str,
         assert output_dir, "output_dir is required if output_file is not provided"
         output_file = os.path.join(output_dir, output_name or response_filename)
 
+    print(f"Starting download...")
+
     with open(output_file, 'wb') as f:
         downloaded = 0
         start_time = time.time()
