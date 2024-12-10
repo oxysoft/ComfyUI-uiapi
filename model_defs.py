@@ -114,7 +114,7 @@ class ModelDef:
             log.info(f"to: {final_path}")
 
             if has_model(self.ckpt_type, path):
-                log.info(f"Model already exists at {final_path}!")gv
+                log.info(f"Model already exists at {final_path}!")
                 return final_path.as_posix()
 
             filename = self.huggingface.split('/')[-1]
