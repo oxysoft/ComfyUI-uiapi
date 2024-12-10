@@ -12,12 +12,16 @@ UIAPI is an intermediate and frontend plugin which allow communicating with the 
 6. The UIAPI acts as a repeater again, this time forwarding to all the other connections
 7. Your program handles the response and unlocks program execution
 
-## Support features
+## Support Calls
 
-* Set / change connections between inputs and outputs of nodes
-* Set values on widgets (numbers and strings)
-* Queue / execute workflow
+* `comfy.connect(path1, path2)` between inputs and outputs of nodes
+* `comfy.set(path, value)` Set values on widgets (numbers and strings)
+* `comfy.execute()` Queue / execute workflow and receive the output image (detected on a list of common Save Image components)
 
-## TODO
+## Downloads
 
-* The UIAPI currently does not offer a way to transfer the output back to the server, and must be directly fetched from the output directly.
+Since it's typical to run ComfyUI on a server and connect to it locally, routing features are provided to download the missing models. To use it,
+
+```
+TODO
+```

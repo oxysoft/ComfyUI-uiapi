@@ -22,6 +22,16 @@ const rename_defaults = [
     'ccg{ControlNetApply}', 'cn_img{LoadImage}'
 ]
 
+const primaryWidgets = {
+    CLIPSetLastLayer: "stop_at_clip_layer",
+    CLIPTextEncode: "text",
+    VAELoader: "vae_name",
+    TomePatchModel: "ratio",
+    SaveImage: "filename_prefix",
+    LoadImage: "image"
+};
+
+
 console.log("=== uiapi.js ===")
 
 const colors = {
@@ -229,17 +239,8 @@ async function post_response(object) {
  * @returns {Object} An object containing the matched node, widget, inputs, and outputs (or their indices).
  */
 function getNodeDataByPath(searchPath, slots_as_indices = false) {
-    const defaultWidgets = {
-        CLIPSetLastLayer: "stop_at_clip_layer",
-        CLIPTextEncode: "text",
-        VAELoader: "vae_name",
-        TomePatchModel: "ratio",
-        SaveImage: "filename_prefix",
-        LoadImage: "image"
-    };
-
     function getDefaultWidget(node) {
-        const widgetName = defaultWidgets[node.type];
+        const widgetName = primaryWidgets[node.type];
         return widgetName ? node.widgets.find(w => w.name === widgetName) : null;
     }
 
