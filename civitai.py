@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import logging
 import os.path
 import re
 import sys
@@ -9,6 +10,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
 
+log = logging.getLogger(__name__)
 
 CHUNK_SIZE = 1638400
 TOKEN_FILE = Path.home() / '.civitai' / 'config'
@@ -146,7 +148,7 @@ def download_file(url: str,
         assert output_dir, "output_dir is required if output_file is not provided"
         output_file = os.path.join(output_dir, output_name or response_filename)
 
-    print(f"Starting download...")
+    log.info(f"Starting download...")
 
     with open(output_file, 'wb') as f:
         downloaded = 0
@@ -169,8 +171,7 @@ def download_file(url: str,
 
             if total_size is not None:
                 progress = downloaded / total_size
-                sys.stdout.write(f'\rDownloading: {output_file} [{progress*100:.2f}%] - {speed:.2f} MB/s')
-                sys.stdout.flush()
+                log.info(f"\rDownloading: {output_file} [{progress*100:.2f}%] - {speed:.2f} MB/s", end="")
 
     end_time = time.time()
     time_taken = end_time - start_time
@@ -184,8 +185,7 @@ def download_file(url: str,
     else:
         time_str = f'{int(seconds)}s'
 
-    sys.stdout.write('\n')
-    print(f'Downloaded in {time_str}')
+    log.info(f'Downloaded in {time_str}')
     return output_file
 
 
