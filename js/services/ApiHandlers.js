@@ -3,6 +3,7 @@ import { app } from "../../../scripts/app.js";
 import { getNodeDataByPath } from "../utils/nodeUtils.js";
 import { getNodes } from "../utils/nodeUtils.js";
 import { showBatchDownloadUrlDialog } from "../components/BatchDownloadDialog.js";
+import { showWorkflowDialog } from "../components/WorkflowDialog.js";
 
 // Client ID management
 let clientId = "-1"; // Initial state before server assigns ID
@@ -193,6 +194,52 @@ export async function handleGetModelUrl(event) {
 }
 
 /**
+ * Handle workflow dialog request
+ * @param {CustomEvent} event - Event object
+ */
+export async function handleShowWorkflowDialog(event) {
+    await handleRequest(event);
+    const { workflow, message, title, request_id } = event.detail;
+
+    try {
+        // Show dialog and get user's choice
+        const accepted = await showWorkflowDialog(workflow, message, title);
+
+        // If accepted, load the workflow
+        if (accepted) {
+            try {
+                // Clear current graph
+                app.graph.clear();
+                
+                // Load new workflow
+                app.loadGraphData(workflow);
+                
+                console.log("[ApiHandlers] Workflow loaded successfully");
+            } catch (error) {
+                console.error("[ApiHandlers] Error loading workflow:", error);
+                await postResponse({
+                    accepted: false,
+                    message: "Error loading workflow: " + error.message
+                }, request_id);
+                return;
+            }
+        }
+
+        // Post response
+        await postResponse({
+            accepted,
+            message: accepted ? "Workflow loaded" : "Workflow rejected"
+        }, request_id);
+    } catch (error) {
+        console.error("[ApiHandlers] Error showing workflow dialog:", error);
+        await postResponse({
+            accepted: false,
+            message: "Error showing workflow dialog: " + error.message
+        }, request_id);
+    }
+}
+
+/**
  * Register all API event handlers
  */
 export function registerApiHandlers() {
@@ -205,6 +252,7 @@ export function registerApiHandlers() {
     api.addEventListener("/uiapi/execute", handleExecute);
     api.addEventListener("/uiapi/query_fields", handleQueryFields);
     api.addEventListener("/uiapi/get_model_url", handleGetModelUrl);
+    api.addEventListener("/uiapi/show_workflow_dialog", handleShowWorkflowDialog);
 
     // Send initial ready signal with browser info
     api.fetchApi("/uiapi/webui_ready", {
@@ -234,4 +282,6 @@ export function registerApiHandlers() {
             // Ignore errors during page unload
         });
     });
+
+    console.log("[ApiHandlers] ✓ All handlers registered");
 } 

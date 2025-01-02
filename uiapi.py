@@ -1075,7 +1075,9 @@ async def uiapi_get_model_url(request):
 
 @routes.post("/uiapi/send_workflow")
 async def uiapi_send_workflow(request):
-    """Send a workflow to the webui for user approval"""
+    """Send a workflow to all connected webuis for user approval"""
+    print("")
+    log.info("-> /uiapi/send_workflow")
     try:
         data = await request.json()
         workflow = data.get("workflow")
@@ -1087,29 +1089,50 @@ async def uiapi_send_workflow(request):
                 {"status": "error", "error": "No workflow provided"}, status=400
             )
 
-        # Create a request to show dialog in webui
-        request = await webui_manager.send(
-            "show_workflow_dialog",
-            {
-                "workflow": workflow,
-                "message": message,
-                "title": title
-            },
-            wait_for_client=True
-        )
-
-        # Wait for user response
-        response = await webui_manager.await_response(request, timeout=INF_TIMEOUT)
-
-        if not response:
+        # Get all connected WebUI managers
+        connected_managers = [m for m in WebuiManager._client_managers.values() if m._webui_ready.is_set()]
+        
+        if not connected_managers:
             return web.json_response(
-                {"status": "error", "error": "No response from webui"}, status=408
+                {"status": "error", "error": "No WebUI clients connected"}, status=400
             )
 
+        log.info(f"Sending workflow dialog to {len(connected_managers)} connected WebUIs")
+        
+        # Send to all connected WebUIs and wait for first accept
+        responses = []
+        for manager in connected_managers:
+            try:
+                # Create a request to show dialog in webui
+                request = await manager.send(
+                    "show_workflow_dialog",
+                    {
+                        "workflow": workflow,
+                        "message": message,
+                        "title": title
+                    },
+                    wait_for_client=True
+                )
+
+                # Wait for user response
+                response = await manager.await_response(request, timeout=INF_TIMEOUT)
+                if response and response.get("accepted", False):
+                    # If any WebUI accepts, return success
+                    return web.json_response({
+                        "status": "ok",
+                        "accepted": True,
+                        "message": response.get("message", "")
+                    })
+                responses.append(response)
+            except Exception as e:
+                log.error(f"Error sending to WebUI {manager.client_id}: {e}")
+                responses.append(None)
+
+        # If we get here, either all rejected or errored
         return web.json_response({
             "status": "ok",
-            "accepted": response.get("accepted", False),
-            "message": response.get("message", "")
+            "accepted": False,
+            "message": "Workflow was rejected by all WebUIs"
         })
 
     except Exception as e:
