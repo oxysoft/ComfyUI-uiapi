@@ -14,8 +14,11 @@ export class ConnectionManager {
     /**
      * Initialize connection management
      */
-    async initialize() {
+    async initialize(browserInfo) {
         console.log("[ConnectionManager] Initializing...");
+        
+        // Store browser info
+        this.browserInfo = browserInfo;
         
         // Set up event listeners
         this.setupEventListeners();
@@ -112,19 +115,23 @@ export class ConnectionManager {
     }
 
     /**
-     * Notify server of client connection
+     * Notify server of connection
      * @private
      */
     async notifyServerConnection() {
         try {
-            await api.fetchApi("/uiapi/webui_ready", {
-                method: "POST"
+            const response = await api.fetchApi('/uiapi/webui_ready', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ browserInfo: this.browserInfo })
             });
-            console.log("[ConnectionManager] ✓ Server successfully notified of connection");
-            this.setConnected();
-        } catch (err) {
-            console.error("[ConnectionManager] ✗ Failed to notify server of connection:", err);
-            this.setDisconnected();
+            
+            if (response.ok) {
+                this.setConnected();
+                console.log("[ConnectionManager] Server notified of connection");
+            }
+        } catch (error) {
+            console.error("[ConnectionManager] Error notifying server of connection:", error);
         }
     }
 

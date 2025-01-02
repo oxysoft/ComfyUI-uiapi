@@ -10,7 +10,7 @@ import { showBatchDownloadUrlDialog } from "../components/BatchDownloadDialog.js
  * @param {string} requestId - Request ID
  */
 async function postResponse(object, requestId) {
-    await api.fetchApi("/uiapi/response", {
+    await api.fetchApi("/uiapi/webui_response", {
         method: "POST",
         body: JSON.stringify({
             response: object ?? {},
@@ -143,17 +143,17 @@ export async function handleQueryFields(event) {
  */
 export async function handleGetModelUrl(event) {
     console.log("[ApiHandlers] handleGetModelUrl");
-    const { model_name, model_names, request_id } = event.detail;
+    const { ckpt_name, requested_ckpts, request_id } = event.detail;
     
     // If we have multiple models, use batch dialog
-    if (model_names && model_names.length > 0) {
+    if (requested_ckpts && requested_ckpts.length > 0) {
         // Filter out models that already exist
-        const missingModels = model_names.filter(name => !event.detail.existing_models?.includes(name));
-        if (missingModels.length === 0) {
+        const missingCkpts = requested_ckpts.filter(ckpt => !event.detail.existing_ckpts?.includes(ckpt));
+        if (missingCkpts.length === 0) {
             await postResponse({}, request_id);
             return;
         }
-        const urlMap = await showBatchDownloadUrlDialog(missingModels);
+        const urlMap = await showBatchDownloadUrlDialog(missingCkpts);
         await postResponse(urlMap ? Object.fromEntries(urlMap) : null, request_id);
         return;
     }

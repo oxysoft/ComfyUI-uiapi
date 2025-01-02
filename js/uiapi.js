@@ -104,12 +104,26 @@ app.registerExtension({
     version: "1.0",
     async setup() {
         console.log("[UIAPI] ==== Setup Starting ====");
-
-        // Initialize connection manager
-        await connectionManager.initialize();
+        
+        // Get browser info
+        const browserInfo = {
+            userAgent: navigator.userAgent,
+            browser: (function() {
+                const ua = navigator.userAgent;
+                if (ua.includes('Firefox')) return 'Firefox';
+                if (ua.includes('Chrome')) return 'Chrome';
+                if (ua.includes('Safari')) return 'Safari';
+                if (ua.includes('Edge')) return 'Edge';
+                return 'Unknown';
+            })(),
+            platform: navigator.platform
+        };
 
         // Register API event handlers
         registerApiHandlers();
+
+        // Initialize connection manager with browser info
+        await connectionManager.initialize(browserInfo);
 
         // Set up mouse event handlers
         const canvas = app.canvas;
