@@ -149,10 +149,10 @@ def download_file(url: str,
         output_file = os.path.join(output_dir, output_name or response_filename)
 
     log.info(f"Starting download...")
-
     with open(output_file, 'wb') as f:
         downloaded = 0
         start_time = time.time()
+        last_progress = -1
 
         while True:
             chunk_start_time = time.time()
@@ -171,7 +171,11 @@ def download_file(url: str,
 
             if total_size is not None:
                 progress = downloaded / total_size
-                log.info(f"\rDownloading: {output_file} [{progress*100:.2f}%] - {speed:.2f} MB/s", end="")
+                progress_10pct = int(progress * 10)  # Convert to 10% increments
+                
+                if progress_10pct > last_progress:
+                    last_progress = progress_10pct
+                    log.info(f"\rDownloading: {output_file} [{progress*100:.0f}%] - {speed:.2f} MB/s")
 
     end_time = time.time()
     time_taken = end_time - start_time

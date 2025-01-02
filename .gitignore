@@ -1,1 +1,7 @@
 __pycache__/**
+node_modules/
+dist/
+js/*.js
+js/*.js.map
+js/*.d.ts
+*.log

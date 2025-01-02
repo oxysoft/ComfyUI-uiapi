@@ -262,6 +262,11 @@ class ControlNetDef(ModelDef):
         else:
             return None
 
+class VaeDef(ModelDef):
+    def __init__(self, path: str):
+        super().__init__(path)
+        self.ckpt_type = "vae"
+
 @dataclass
 class LoraDef(ModelDef):
     """Represents a LoRA configuration with path and strength information"""
@@ -341,14 +346,26 @@ class LoRASource:
     def __repr__(self):
         return f"LoRASource({self.original_path})"
 
+
+
+
 def get_model_path(type, ckpt_name, required=False):
     """
-    Get a SD model full path from its name, searching all the defined model locations
+    Get a SD model full path from its name, searching all the defined model locations.
+    If type is None, searches all model types.
     """
     import folder_paths
-    ret = folder_paths.get_full_path(type, ckpt_name)
-    if ret is not None:
-        return ret
+    
+    if type is not None:
+        ret = folder_paths.get_full_path(type, ckpt_name)
+        if ret is not None:
+            return ret
+    else:
+        # Try all model types if type is None
+        for model_type in folder_paths.folder_names_and_paths.keys():
+            ret = folder_paths.get_full_path(model_type, ckpt_name)
+            if ret is not None:
+                return ret
 
     if required:
         raise ValueError(f"Model {ckpt_name} not found")
