@@ -4,6 +4,14 @@ import { getNodeDataByPath } from "../utils/nodeUtils.js";
 import { getNodes } from "../utils/nodeUtils.js";
 import { showBatchDownloadUrlDialog } from "../components/BatchDownloadDialog.js";
 
+// Client ID management
+let clientId = "-1"; // Initial state before server assigns ID
+
+export function setClientId(id) {
+    clientId = id;
+    console.log("[ApiHandlers] Client ID set to:", id);
+}
+
 /**
  * Post a response to the API
  * @param {Object} object - Response object
@@ -14,10 +22,11 @@ async function postResponse(object, requestId) {
         method: "POST",
         body: JSON.stringify({
             response: object ?? {},
-            request_id: requestId
+            request_id: requestId,
+            client_id: clientId
         })
     });
-    console.log("[ApiHandlers] Posted response", object ?? {}, "request_id:", requestId);
+    console.log("[ApiHandlers] Posted response", object ?? {}, "request_id:", requestId, "client_id:", clientId);
 }
 
 /**
@@ -25,6 +34,7 @@ async function postResponse(object, requestId) {
  * @param {CustomEvent} event - Event object
  */
 export async function handleGetWorkflow(event) {
+    await handleRequest(event);
     const { request_id } = event.detail;
     const prompt = await app.graphToPrompt();
     await postResponse({ workflow: prompt }, request_id);
@@ -35,6 +45,7 @@ export async function handleGetWorkflow(event) {
  * @param {CustomEvent} event - Event object
  */
 export async function handleGetFields(event) {
+    await handleRequest(event);
     const { fields, verbose, request_id } = event.detail;
 
     if (verbose) {
@@ -66,6 +77,7 @@ export async function handleGetFields(event) {
  * @param {CustomEvent} event - Event object
  */
 export async function handleSetFields(event) {
+    await handleRequest(event);
     const { field, fields, verbose, request_id } = event.detail;
     const fieldsToProcess = fields || [field];
 
@@ -88,6 +100,7 @@ export async function handleSetFields(event) {
  * @param {CustomEvent} event - Event object
  */
 export async function handleSetConnection(event) {
+    await handleRequest(event);
     const { field: [path1, path2], verbose, request_id } = event.detail;
 
     if (verbose) {
@@ -104,11 +117,20 @@ export async function handleSetConnection(event) {
     await postResponse(null, request_id);
 }
 
+export async function handleRequest(event) {
+    const { client_id, request_id, endpoint, data } = event.detail;
+    
+    if (client_id !== clientId) {
+        setClientId(client_id);
+    }
+}
+
 /**
  * Handle workflow execution request
  * @param {CustomEvent} event - Event object
  */
 export async function handleExecute(event) {
+    await handleRequest(event);
     const { request_id } = event.detail;
     const prompt = await app.graphToPrompt();
     const res = await api.queuePrompt(0, prompt);
@@ -120,6 +142,7 @@ export async function handleExecute(event) {
  * @param {CustomEvent} event - Event object
  */
 export async function handleQueryFields(event) {
+    await handleRequest(event);
     const { verbose, request_id } = event.detail;
     
     const nodes = getNodes().map(node => ({
@@ -142,6 +165,7 @@ export async function handleQueryFields(event) {
  * @param {CustomEvent} event - Event object
  */
 export async function handleGetModelUrl(event) {
+    await handleRequest(event);
     console.log("[ApiHandlers] handleGetModelUrl");
     const { ckpt_name, requested_ckpts, request_id } = event.detail;
     
@@ -159,9 +183,9 @@ export async function handleGetModelUrl(event) {
     }
     
     // Single model fallback
-    const urlMap = await showBatchDownloadUrlDialog([model_name]);
+    const urlMap = await showBatchDownloadUrlDialog([ckpt_name]);
     if (urlMap && urlMap.size > 0) {
-        const url = urlMap.get(model_name);
+        const url = urlMap.get(ckpt_name);
         await postResponse(url ? { url } : null, request_id);
     } else {
         await postResponse(null, request_id);
@@ -181,4 +205,33 @@ export function registerApiHandlers() {
     api.addEventListener("/uiapi/execute", handleExecute);
     api.addEventListener("/uiapi/query_fields", handleQueryFields);
     api.addEventListener("/uiapi/get_model_url", handleGetModelUrl);
+
+    // Send initial ready signal with browser info
+    api.fetchApi("/uiapi/webui_ready", {
+        method: "POST",
+        body: JSON.stringify({
+            client_id: clientId,
+            browserInfo: {
+                browser: navigator.userAgent,
+                platform: navigator.platform
+            }
+        })
+    }).then(async response => {
+        const data = await response.json();
+        if (data.client_id) {
+            setClientId(data.client_id);
+        }
+    }).catch(err => {
+        console.error("[ApiHandlers] Error during webui_ready:", err);
+    });
+
+    // Handle disconnect
+    window.addEventListener('beforeunload', () => {
+        api.fetchApi("/uiapi/webui_disconnect", {
+            method: "POST",
+            body: JSON.stringify({ client_id: clientId })
+        }).catch(() => {
+            // Ignore errors during page unload
+        });
+    });
 } 

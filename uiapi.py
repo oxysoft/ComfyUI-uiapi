@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import sys
 import time
 import json
 import traceback
@@ -64,8 +63,8 @@ RESET = "\033[0m"
 
 LOG_WEBUI_RESPOND = f"{BLUE}(webui:respond){RESET}"
 LOG_WEBUI_SEND = f"{BLUE}(webui:send){RESET}"
-LOG_WEBUI_CONNECT = f"{BLUE}(webui:connected){RESET}"
-LOG_WEBUI_DISCONNECT = f"{BLUE}(webui:disconnect){RESET}"
+LOG_WEBUI_CONNECT = f"{BLUE}(webui){RESET}"
+LOG_WEBUI_DISCONNECT = f"{BLUE}(webui){RESET}"
 LOG_TASK_START = f"{MAGENTA}(task:start){RESET}"
 LOG_TASK_END = f"{MAGENTA}(task:end){RESET}"
 LOG_TASK = f"{MAGENTA}(task){RESET}"
@@ -156,6 +155,7 @@ for handler in log.handlers[:]:
 
 INPUT_DIR = Path(__file__).parent.parent.parent / "input"
 
+NEXT_CLIENT_ID = 0
 
 @dataclass
 class PendingRequest:
@@ -170,12 +170,45 @@ class PendingRequest:
 
 
 class WebuiManager:
+    # Class-level dictionary to store all client managers
+    _client_managers: Dict[int, 'WebuiManager'] = {}
+
     def __init__(self):
         self._pending_requests: Dict[str, PendingRequest] = {}
+        self._client_id: Optional[int] = None
         self._webui_ready = asyncio.Event()
         self._buffered_requests: list[PendingRequest] = []
         self._lock = asyncio.Lock()
-        log.info("FrontendManager initialized")
+        log.info(f"{LOG_WEBUI_CONNECT} - *")
+
+    @property
+    def client_id(self) -> Optional[int]:
+        """Get the client ID for this manager"""
+        return self._client_id
+
+    @classmethod
+    def get_or_create_manager(cls, client_id: int) -> 'WebuiManager':
+        """Get an existing manager or create a new one for a client ID"""
+        id = int(client_id)
+
+        if id == -1:
+            global NEXT_CLIENT_ID
+            NEXT_CLIENT_ID += 1
+
+            # Create new manager and generate UUID
+            manager = cls()
+            manager._client_id = NEXT_CLIENT_ID
+            cls._client_managers[NEXT_CLIENT_ID] = manager
+            return manager
+        
+        if id in cls._client_managers:
+            return cls._client_managers[id]
+        
+        # Create new manager with provided ID
+        manager = cls()
+        manager._client_id = id
+        cls._client_managers[id] = manager
+        return manager
 
     def set_connected(self):
         """Called when ComfyUI web interface connects"""
@@ -184,26 +217,30 @@ class WebuiManager:
         # Process buffered requests
         if len(self._buffered_requests) > 0:
             log.info(
-                f"{LOG_WEBUI_CONNECT} - {len(self._buffered_requests)} requests in buffer"
+                f"{LOG_WEBUI_CONNECT} [{self._client_id}] - {len(self._buffered_requests)} requests in buffer"
             )
             for req in self._buffered_requests:
                 log.info(f"Processing buffered request: {req.endpoint}")
         else:
-            log.info(f"{LOG_WEBUI_CONNECT}")
+            log.info(f"{LOG_WEBUI_CONNECT} [{self._client_id}]")
 
         self._buffered_requests.clear()
 
     def set_disconnected(self):
         """Called when ComfyUI web interface disconnects"""
-        log.warning(f"{LOG_WEBUI_DISCONNECT}")
+        log.warning(f"{LOG_WEBUI_DISCONNECT} [{self._client_id}]")
         self._webui_ready.clear()
+        if self._client_id in self._client_managers:
+            del self._client_managers[self._client_id]
 
     async def _send(self, request: PendingRequest):
         """Send a request to the client"""
         data_str = json.dumps(request.data, indent=2).replace("\n", " ")
         log.info(
-            f"{LOG_WEBUI_SEND} {request.request_id} {request.endpoint} {data_str[:100]}{'...' if len(data_str) > 100 else ''}"
+            f"{LOG_WEBUI_SEND} [{self._client_id}] {request.request_id} {request.endpoint} {data_str[:100]}{'...' if len(data_str) > 100 else ''}"
         )
+        # Add client_id to request data
+        request.data["client_id"] = self._client_id
         await server.PromptServer.instance.send_json(request.endpoint, request.data)
 
     async def send(
@@ -216,14 +253,11 @@ class WebuiManager:
         """Create a new request and optionally buffer it"""
         request_id = str(uuid.uuid4())[:8]
         endpoint = f"/uiapi/{endpoint}"
-        # log.info(f"(webui:send) {request_id} {endpoint}")
-        # log.info(
-        #     f"(webui:send) wait={wait_for_client}, post-process: {'yes' if post_process else 'no'}"
-        # )
 
         if data is None:
             data = {}
         data["request_id"] = request_id
+        data["client_id"] = self._client_id
 
         request = PendingRequest(
             request_id=request_id,
@@ -236,7 +270,7 @@ class WebuiManager:
         async with self._lock:
             self._pending_requests[request_id] = request
             if wait_for_client and not self._webui_ready.is_set():
-                log.info(f"{LOG_WEBUI_SEND} {request_id} - WebUI not ready, buffering ...")
+                log.info(f"{LOG_WEBUI_SEND} [{self._client_id}] {request_id} - WebUI not ready, buffering ...")
                 self._buffered_requests.append(request)
                 return request
 
@@ -247,7 +281,7 @@ class WebuiManager:
         """Set response for a request and process it"""
         response_str = json.dumps(response_data, indent=2)
         log.info(
-            f"{LOG_WEBUI_RESPOND} {request_id} {response_str[:100]}{'...' if len(response_str) > 100 else ''}"
+            f"{LOG_WEBUI_RESPOND} [{self._client_id}] {request_id} {response_str[:100]}{'...' if len(response_str) > 100 else ''}"
         )
 
         async with self._lock:
@@ -256,7 +290,7 @@ class WebuiManager:
                 or self._pending_requests[request_id].response
             ):
                 log.warning(
-                    f"{LOG_WEBUI_RESPOND} response received for unknown request: {request_id}"
+                    f"{LOG_WEBUI_RESPOND} [{self._client_id}] response received for unknown request: {request_id}"
                 )
                 return
 
@@ -275,22 +309,22 @@ class WebuiManager:
                     log.error(traceback.format_exc())
 
             request.event.set()
-            log.debug(f"{LOG_WEBUI_RESPOND} {request_id} complete")
+            log.debug(f"{LOG_WEBUI_RESPOND} [{self._client_id}] {request_id} complete")
 
     async def await_response(
         self, request: PendingRequest, timeout: float = 30.0
     ) -> Any:
         """Wait for and return response for a request"""
-        log.debug(f"{LOG_WEBUI_SEND} {request.request_id} (timeout={timeout}s)")
+        log.debug(f"{LOG_WEBUI_SEND} [{self._client_id}] {request.request_id} (timeout={timeout}s)")
         try:
             await asyncio.wait_for(request.event.wait(), timeout)
             return request.response
         except asyncio.TimeoutError:
-            log.error(f"{LOG_WEBUI_SEND} {request.request_id} timed out after {timeout}s")
+            log.error(f"{LOG_WEBUI_SEND} [{self._client_id}] {request.request_id} timed out after {timeout}s")
         finally:
             async with self._lock:
                 self._pending_requests.pop(request.request_id, None)
-                log.debug(f"{LOG_WEBUI_SEND} {request.request_id} popped")
+                log.debug(f"{LOG_WEBUI_SEND} [{self._client_id}] {request.request_id} popped")
 
 
 # Initialize the request manager
@@ -379,17 +413,23 @@ async def uiapi_webui_ready(request):
     """Called when ComfyUI web interface connects"""
     print()
     data = await request.json()
+    client_id = data.get('client_id', '-1')
     browser_info = data.get('browserInfo', {})
     browser_name = browser_info.get('browser', 'Unknown Browser')
     platform = browser_info.get('platform', 'Unknown Platform')
     
-    log.info(f"{LOG_WEBUI_CONNECT} - Hello from {browser_name} on {platform}!")
-    webui_manager.set_connected()
+    # Get or create manager for this client
+    print("")
+    log.info("-> /uiapi/webui_ready")
+
+    manager = WebuiManager.get_or_create_manager(client_id)
+    log.info(f"{LOG_WEBUI_CONNECT} [{manager.client_id}] - Hello from {browser_name} on {platform}!")
+    manager.set_connected()
 
     try:
         # Fetch current workflow
-        request = await webui_manager.send("get_workflow", wait_for_client=True)
-        workflow = await webui_manager.await_response(request)
+        request = await manager.send("get_workflow", wait_for_client=True)
+        workflow = await manager.await_response(request)
 
         if workflow:
             workflow = workflow["workflow"]["workflow"]
@@ -417,13 +457,17 @@ async def uiapi_webui_ready(request):
         log.error(f"Error analyzing workflow: {e}")
         log.error(traceback.format_exc())
 
-    return web.json_response({"status": "ok"})
+    return web.json_response({"status": "ok", "client_id": manager.client_id})
 
 
 @routes.post("/uiapi/webui_disconnect")
 async def uiapi_webui_disconnect(request):
     """Called when ComfyUI web interface disconnects"""
-    webui_manager.set_disconnected()
+    data = await request.json()
+    client_id = data.get('client_id')
+    if client_id:
+        manager = WebuiManager.get_or_create_manager(client_id)
+        manager.set_disconnected()
     return web.json_response({"status": "ok"})
 
 
@@ -431,14 +475,20 @@ async def uiapi_webui_disconnect(request):
 async def uiapi_response(request):
     data = await request.json()
     request_id = data.get("request_id")
-    # print()
-    # log.info("-> /uiapi/response")
+    client_id = data.get("client_id")
+    
     if not request_id:
         return web.json_response(
             {"status": "error", "error": "No request_id provided"}, status=400
         )
+        
+    if not client_id:
+        return web.json_response(
+            {"status": "error", "error": "No client_id provided"}, status=400
+        )
 
-    await webui_manager.respond(request_id, data.get("response"))
+    manager = WebuiManager.get_or_create_manager(client_id)
+    await manager.respond(request_id, data.get("response"))
     return web.json_response({"status": "ok"})
 
 
@@ -452,10 +502,18 @@ async def process_workflow_response(response: Any) -> Any:
         # Handle normal response
         return response.get("response", {})
     elif isinstance(response, web.Response):
-        response_text = await response.text()
-        response_data = json.loads(response_text)
-        if "workflow" in response_data:
-            return response_data["workflow"]
+        # Get response text directly from the response object
+        try:
+            if isinstance(response.text, str):
+                response_text = response.text
+            else:
+                response_text = await response.text()
+            response_data = json.loads(response_text)
+            if "workflow" in response_data:
+                return response_data["workflow"]
+        except Exception as e:
+            log.error(f"Error processing workflow response: {e}")
+            log.error(traceback.format_exc())
     return response
 
 
@@ -827,19 +885,29 @@ async def download_models_task(
 async def uiapi_connection_status(request):
     """Check if ComfyUI web interface is connected and get system status"""
     try:
-        status = {
-            "status": "ok",
-            "webui_connected": webui_manager._webui_ready.is_set(),
-            "pending_requests": len(webui_manager._buffered_requests),
-            "active_downloads": len(download_tasks),
-            "pending_downloads": len(pending_downloads),
-            "server_time": time.time(),
-            "server_uptime": time.time() - server_start_time,
-        }
+        client_id = request.query.get('client_id')
+        if client_id:
+            manager = WebuiManager.get_or_create_manager(client_id)
+            status = {
+                "status": "ok",
+                "webui_connected": manager._webui_ready.is_set(),
+                "pending_requests": len(manager._buffered_requests),
+                "client_id": manager.client_id,
+                "server_time": time.time(),
+                "server_uptime": time.time() - server_start_time,
+            }
+        else:
+            # Return overall system status
+            status = {
+                "status": "ok",
+                "active_clients": len(WebuiManager._client_managers),
+                "active_downloads": len(download_tasks),
+                "pending_downloads": len(pending_downloads),
+                "server_time": time.time(),
+                "server_uptime": time.time() - server_start_time,
+            }
 
         log.debug("-> /uiapi/connection_status")
-        # log.debug("-> /uiapi/connection_status: {status}")
-
         return web.json_response(status)
     except Exception as e:
         log.error(f"Error in connection status check: {e}")
@@ -850,7 +918,11 @@ async def uiapi_connection_status(request):
 async def uiapi_client_disconnect(request):
     """Handle explicit client disconnect notification"""
     try:
-        webui_manager.set_disconnected()
+        data = await request.json()
+        client_id = data.get('client_id')
+        if client_id:
+            manager = WebuiManager.get_or_create_manager(client_id)
+            manager.set_disconnected()
         return web.json_response({"status": "ok"})
     except Exception as e:
         log.error(f"Error handling client disconnect: {e}")
@@ -900,17 +972,15 @@ async def uiapi_model_status(request):
 
     try:
         # Check if model exists
-        for model_type in model_defs.MODEL_PATHS.keys():
-            if model_defs.has_model(model_name, model_type):
-                path = model_defs.get_model_path(model_name, model_type)
-                return web.json_response(
-                    {
-                        "status": "success",
-                        "exists": True,
-                        "path": str(path),
-                        "type": model_type,
-                    }
-                )
+        if model_defs.has_model(model_name):
+            path = model_defs.get_model_path(model_name)
+            return web.json_response(
+                {
+                    "status": "success",
+                    "exists": True,
+                    "path": str(path),
+                }
+            )
 
         # Check if download is in progress
         if model_name in download_tasks:
@@ -999,6 +1069,51 @@ async def uiapi_get_model_url(request):
 
     except Exception as e:
         log.error(f"Error getting model URL: {e}")
+        log.error(traceback.format_exc())
+        return web.json_response({"status": "error", "error": str(e)}, status=500)
+
+
+@routes.post("/uiapi/send_workflow")
+async def uiapi_send_workflow(request):
+    """Send a workflow to the webui for user approval"""
+    try:
+        data = await request.json()
+        workflow = data.get("workflow")
+        message = data.get("message", "Would you like to load this workflow?")
+        title = data.get("title", "Load Workflow")
+
+        if not workflow:
+            return web.json_response(
+                {"status": "error", "error": "No workflow provided"}, status=400
+            )
+
+        # Create a request to show dialog in webui
+        request = await webui_manager.send(
+            "show_workflow_dialog",
+            {
+                "workflow": workflow,
+                "message": message,
+                "title": title
+            },
+            wait_for_client=True
+        )
+
+        # Wait for user response
+        response = await webui_manager.await_response(request, timeout=INF_TIMEOUT)
+
+        if not response:
+            return web.json_response(
+                {"status": "error", "error": "No response from webui"}, status=408
+            )
+
+        return web.json_response({
+            "status": "ok",
+            "accepted": response.get("accepted", False),
+            "message": response.get("message", "")
+        })
+
+    except Exception as e:
+        log.error(f"Error sending workflow: {e}")
         log.error(traceback.format_exc())
         return web.json_response({"status": "error", "error": str(e)}, status=500)
 
