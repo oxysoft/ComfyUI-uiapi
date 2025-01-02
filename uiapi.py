@@ -172,6 +172,7 @@ class PendingRequest:
 class WebuiManager:
     # Class-level dictionary to store all client managers
     _client_managers: Dict[int, 'WebuiManager'] = {}
+    _main_webui: Optional['WebuiManager'] = None
 
     def __init__(self):
         self._pending_requests: Dict[str, PendingRequest] = {}
@@ -210,9 +211,19 @@ class WebuiManager:
         cls._client_managers[id] = manager
         return manager
 
+    @classmethod
+    def get_main_webui(cls) -> Optional['WebuiManager']:
+        """Get the main WebUI manager instance"""
+        return cls._main_webui
+
     def set_connected(self):
         """Called when ComfyUI web interface connects"""
         self._webui_ready.set()
+
+        # Set this as the main WebUI if none exists or current main is disconnected
+        if not self.__class__._main_webui or not self.__class__._main_webui._webui_ready.is_set():
+            log.info(f"{LOG_WEBUI_CONNECT} [{self._client_id}] - Setting as main WebUI")
+            self.__class__._main_webui = self
 
         # Process buffered requests
         if len(self._buffered_requests) > 0:
@@ -230,6 +241,16 @@ class WebuiManager:
         """Called when ComfyUI web interface disconnects"""
         log.warning(f"{LOG_WEBUI_DISCONNECT} [{self._client_id}]")
         self._webui_ready.clear()
+        
+        # If this was the main WebUI, try to find another connected one
+        if self.__class__._main_webui == self:
+            self.__class__._main_webui = None
+            for manager in self.__class__._client_managers.values():
+                if manager != self and manager._webui_ready.is_set():
+                    log.info(f"{LOG_WEBUI_CONNECT} [{manager._client_id}] - Setting as new main WebUI")
+                    self.__class__._main_webui = manager
+                    break
+
         if self._client_id in self._client_managers:
             del self._client_managers[self._client_id]
 
@@ -344,11 +365,18 @@ async def handle_uiapi_request(
     )
 
     try:
-        request = await webui_manager.send(
+        # Get the main WebUI manager
+        main_webui = WebuiManager.get_main_webui()
+        if not main_webui:
+            return web.json_response(
+                {"status": "error", "error": "No main WebUI connected"}, status=503
+            )
+
+        request = await main_webui.send(
             endpoint, request_data, wait_for_client, post_process
         )
 
-        if request in webui_manager._buffered_requests:
+        if request in main_webui._buffered_requests:
             log.info(f"{LOG_WEBUI_SEND} {request.request_id} - buffered")
             return web.json_response(
                 {
@@ -358,7 +386,7 @@ async def handle_uiapi_request(
                 }
             )
 
-        response = await webui_manager.await_response(request, timeout=30.0)
+        response = await main_webui.await_response(request, timeout=30.0)
         log.info(f"Request completed successfully {request.request_id}")
         return web.json_response({"status": "ok", "response": response})
     except asyncio.TimeoutError:
@@ -427,7 +455,7 @@ async def uiapi_webui_ready(request):
     manager.set_connected()
 
     try:
-        # Fetch current workflow
+        # Fetch current workflow using this manager since it just connected
         request = await manager.send("get_workflow", wait_for_client=True)
         workflow = await manager.await_response(request)
 
@@ -504,13 +532,16 @@ async def process_workflow_response(response: Any) -> Any:
     elif isinstance(response, web.Response):
         # Get response text directly from the response object
         try:
-            if isinstance(response.text, str):
-                response_text = response.text
-            else:
-                response_text = await response.text()
-            response_data = json.loads(response_text)
-            if "workflow" in response_data:
-                return response_data["workflow"]
+            if hasattr(response, 'text'):
+                if callable(response.text):
+                    response_text = await response.text()
+                else:
+                    response_text = response.text
+                    
+                if isinstance(response_text, str):
+                    response_data = json.loads(response_text)
+                    if "workflow" in response_data:
+                        return response_data["workflow"]
         except Exception as e:
             log.error(f"Error processing workflow response: {e}")
             log.error(traceback.format_exc())
@@ -893,14 +924,17 @@ async def uiapi_connection_status(request):
                 "webui_connected": manager._webui_ready.is_set(),
                 "pending_requests": len(manager._buffered_requests),
                 "client_id": manager.client_id,
+                "is_main": manager == WebuiManager.get_main_webui(),
                 "server_time": time.time(),
                 "server_uptime": time.time() - server_start_time,
             }
         else:
             # Return overall system status
+            main_webui = WebuiManager.get_main_webui()
             status = {
                 "status": "ok",
                 "active_clients": len(WebuiManager._client_managers),
+                "main_webui_id": main_webui.client_id if main_webui else None,
                 "active_downloads": len(download_tasks),
                 "pending_downloads": len(pending_downloads),
                 "server_time": time.time(),
