@@ -42,6 +42,17 @@ export async function handleGetWorkflow(event) {
 }
 
 /**
+ * Handle workflow API retrieval request
+ * @param {CustomEvent} event - Event object
+ */
+export async function handleGetWorkflowApi(event) {
+    await handleRequest(event);
+    const { request_id } = event.detail;
+    const prompt = await app.graphToPrompt();
+    await postResponse({ output: prompt.output }, request_id);
+}
+
+/**
  * Handle field retrieval request
  * @param {CustomEvent} event - Event object
  */
@@ -245,6 +256,7 @@ export async function handleShowWorkflowDialog(event) {
 export function registerApiHandlers() {
     console.log("[ApiHandlers] registerApiHandlers")
     api.addEventListener("/uiapi/get_workflow", handleGetWorkflow);
+    api.addEventListener("/uiapi/get_workflow_api", handleGetWorkflowApi);
     api.addEventListener("/uiapi/get_field", handleGetFields);
     api.addEventListener("/uiapi/get_fields", handleGetFields);
     api.addEventListener("/uiapi/set_fields", handleSetFields);

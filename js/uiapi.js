@@ -123,7 +123,7 @@ app.registerExtension({
         registerApiHandlers();
 
         // Initialize connection manager with browser info
-        // await connectionManager.initialize(browserInfo);
+        await connectionManager.initialize(browserInfo);
 
         // Set up mouse event handlers
         const canvas = app.canvas;

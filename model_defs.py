@@ -14,7 +14,7 @@ from rich.traceback import install
 
 from huggingface_hub import hf_hub_download
 import gdown
-from .civitai import download_file
+from civitai import download_file
 
 # ANSI color codes
 BLACK = "\033[30m"
@@ -150,9 +150,9 @@ class ModelDef:
 
         raise ValueError("No valid model path found")
 
-    def _get_final_path(self, path: str) -> Path:
+    def _get_final_path(self, path: str, ckpt_type: str) -> Path:
         """Get the final path for the model and create parent directories"""
-        final_path = det_model_path(path, self.ckpt_type)
+        final_path = det_model_path(path, ckpt_type)
         os.makedirs(final_path.parent, exist_ok=True)
         return final_path
 
@@ -219,7 +219,11 @@ class ModelDef:
         return final_path
 
     def download(
-        self, ckpt: str, source: Optional[str] = None, url: Optional[str] = None
+        self,
+        ckpt: str,
+        source: Optional[str] = None,
+        url: Optional[str] = None,
+        type: Optional[str] = None,
     ) -> str:
         """
         Download model from configured source and return local path.
@@ -232,12 +236,6 @@ class ModelDef:
         Returns:
             str: Path where the model was saved
         """
-        # Check if model already exists
-        final_path = self._get_final_path(ckpt)
-        if has_model(ckpt, self.ckpt_type):
-            log.info(f"{LOG_MODEL} Model {BOLD}{ckpt}{RESET} already exists at {final_path}")
-            return final_path.as_posix()
-
         # Handle generic URL-based model definition
         url = url or self.url
         civitai = self.civitai
@@ -256,6 +254,13 @@ class ModelDef:
             else:
                 log.error(f"{LOG_ERROR} Invalid model URL: {url}")
                 raise ValueError(f"Invalid model URL: {url}")
+
+        # Check if model already exists
+        ckpt_type = type or self.ckpt_type
+        final_path = self._get_final_path(ckpt, ckpt_type)
+        if has_model(ckpt, ckpt_type):
+            log.info(f"{LOG_MODEL} Model {BOLD}{ckpt}{RESET} already exists at {final_path}")
+            return final_path.as_posix()
 
         try:
             # Use specified source if provided
@@ -461,14 +466,14 @@ def get_model_path(ckpt_name, type=None, required=False):
     if type is not None:
         ret = folder_paths.get_full_path(type, ckpt_name)
         if ret is not None:
-            log.debug(f"{LOG_PATH} Found {BOLD}{ckpt_name}{RESET} in {type} at {BOLD}{ret}{RESET}")
+            # log.info(f"{LOG_PATH} Found {BOLD}{ckpt_name}{RESET} in {type} at {BOLD}{ret}{RESET}")
             return ret
     else:
         # Try all model types if type is None
         for model_type in folder_paths.folder_names_and_paths.keys():
             ret = folder_paths.get_full_path(model_type, ckpt_name)
             if ret is not None:
-                log.debug(f"{LOG_PATH} Found {BOLD}{ckpt_name}{RESET} in {model_type} at {BOLD}{ret}{RESET}")
+                # log.debug(f"{LOG_PATH} Found {BOLD}{ckpt_name}{RESET} in {model_type} at {BOLD}{ret}{RESET}")
                 return ret
 
     if required:

@@ -1,4 +1,5 @@
 import asyncio
+from calendar import c
 import logging
 import time
 import json
@@ -17,7 +18,7 @@ from rich.traceback import install
 # Regular colors
 BLACK = "\033[30m"
 RED = "\033[31m"
-GREEN = "\033[32m" 
+GREEN = "\033[32m"
 YELLOW = "\033[33m"
 BLUE = "\033[34m"
 MAGENTA = "\033[35m"
@@ -83,7 +84,6 @@ from server import PromptServer
 MODEL_URLS_PATH = Path(__file__).parent / "model_urls.json"
 INF_TIMEOUT = 99999999999
 
-
 def load_stored_urlmap() -> Dict[str, str]:
     """Load saved model URLs from JSON file"""
     if MODEL_URLS_PATH.exists():
@@ -110,7 +110,8 @@ def save_model_urls(urls: Dict[str, str]) -> None:
         log.error(f"Error saving model URLs: {e}")
 
 
-routes = PromptServer.instance.routes
+# Mock routes if server not initialized
+routes = PromptServer.instance.routes if hasattr(PromptServer, 'instance') and PromptServer.instance else RouteTableDef()
 server_start_time = time.time()
 
 # Install rich traceback handler
@@ -157,6 +158,7 @@ INPUT_DIR = Path(__file__).parent.parent.parent / "input"
 
 NEXT_CLIENT_ID = 0
 
+
 @dataclass
 class PendingRequest:
     """Represents a request that's waiting for client response"""
@@ -171,8 +173,8 @@ class PendingRequest:
 
 class WebuiManager:
     # Class-level dictionary to store all client managers
-    _client_managers: Dict[int, 'WebuiManager'] = {}
-    _main_webui: Optional['WebuiManager'] = None
+    _client_managers: Dict[int, "WebuiManager"] = {}
+    _main_webui: Optional["WebuiManager"] = None
 
     def __init__(self):
         self._pending_requests: Dict[str, PendingRequest] = {}
@@ -188,7 +190,7 @@ class WebuiManager:
         return self._client_id
 
     @classmethod
-    def get_or_create_manager(cls, client_id: int) -> 'WebuiManager':
+    def get_or_create_manager(cls, client_id: int) -> "WebuiManager":
         """Get an existing manager or create a new one for a client ID"""
         id = int(client_id)
 
@@ -201,10 +203,10 @@ class WebuiManager:
             manager._client_id = NEXT_CLIENT_ID
             cls._client_managers[NEXT_CLIENT_ID] = manager
             return manager
-        
+
         if id in cls._client_managers:
             return cls._client_managers[id]
-        
+
         # Create new manager with provided ID
         manager = cls()
         manager._client_id = id
@@ -212,7 +214,7 @@ class WebuiManager:
         return manager
 
     @classmethod
-    def get_main_webui(cls) -> Optional['WebuiManager']:
+    def get_main_webui(cls) -> Optional["WebuiManager"]:
         """Get the main WebUI manager instance"""
         return cls._main_webui
 
@@ -221,7 +223,10 @@ class WebuiManager:
         self._webui_ready.set()
 
         # Set this as the main WebUI if none exists or current main is disconnected
-        if not self.__class__._main_webui or not self.__class__._main_webui._webui_ready.is_set():
+        if (
+            not self.__class__._main_webui
+            or not self.__class__._main_webui._webui_ready.is_set()
+        ):
             log.info(f"{LOG_WEBUI_CONNECT} [{self._client_id}] - Setting as main WebUI")
             self.__class__._main_webui = self
 
@@ -241,13 +246,15 @@ class WebuiManager:
         """Called when ComfyUI web interface disconnects"""
         log.warning(f"{LOG_WEBUI_DISCONNECT} [{self._client_id}]")
         self._webui_ready.clear()
-        
+
         # If this was the main WebUI, try to find another connected one
         if self.__class__._main_webui == self:
             self.__class__._main_webui = None
             for manager in self.__class__._client_managers.values():
                 if manager != self and manager._webui_ready.is_set():
-                    log.info(f"{LOG_WEBUI_CONNECT} [{manager._client_id}] - Setting as new main WebUI")
+                    log.info(
+                        f"{LOG_WEBUI_CONNECT} [{manager._client_id}] - Setting as new main WebUI"
+                    )
                     self.__class__._main_webui = manager
                     break
 
@@ -268,7 +275,7 @@ class WebuiManager:
         self,
         endpoint: str,
         data: dict | None = None,
-        wait_for_client: bool = False,
+        buffered: bool = False,
         post_process: Optional[Callable[[Any], Awaitable[Any]]] = None,
     ) -> PendingRequest:
         """Create a new request and optionally buffer it"""
@@ -290,13 +297,26 @@ class WebuiManager:
 
         async with self._lock:
             self._pending_requests[request_id] = request
-            if wait_for_client and not self._webui_ready.is_set():
-                log.info(f"{LOG_WEBUI_SEND} [{self._client_id}] {request_id} - WebUI not ready, buffering ...")
+            if buffered and not self._webui_ready.is_set():
+                log.info(
+                    f"{LOG_WEBUI_SEND} [{self._client_id}] {request_id} - WebUI not ready, buffering ..."
+                )
                 self._buffered_requests.append(request)
                 return request
 
         await self._send(request)
         return request
+
+    async def wsend(
+        self,
+        endpoint: str,
+        data: dict | None = None,
+        buffered: bool = False,
+        post_process: Optional[Callable[[Any], Awaitable[Any]]] = None,
+    ) -> Any:
+        """Send a request to the client and wait for a response"""
+        request = await self.send(endpoint, data, buffered, post_process)
+        return await self.wait(request)
 
     async def respond(self, request_id: str, response_data: Any):
         """Set response for a request and process it"""
@@ -332,20 +352,24 @@ class WebuiManager:
             request.event.set()
             log.debug(f"{LOG_WEBUI_RESPOND} [{self._client_id}] {request_id} complete")
 
-    async def await_response(
-        self, request: PendingRequest, timeout: float = 30.0
-    ) -> Any:
+    async def wait(self, request: PendingRequest, timeout: float = 30.0) -> Any:
         """Wait for and return response for a request"""
-        log.debug(f"{LOG_WEBUI_SEND} [{self._client_id}] {request.request_id} (timeout={timeout}s)")
+        log.debug(
+            f"{LOG_WEBUI_SEND} [{self._client_id}] {request.request_id} (timeout={timeout}s)"
+        )
         try:
             await asyncio.wait_for(request.event.wait(), timeout)
             return request.response
         except asyncio.TimeoutError:
-            log.error(f"{LOG_WEBUI_SEND} [{self._client_id}] {request.request_id} timed out after {timeout}s")
+            log.error(
+                f"{LOG_WEBUI_SEND} [{self._client_id}] {request.request_id} timed out after {timeout}s"
+            )
         finally:
             async with self._lock:
                 self._pending_requests.pop(request.request_id, None)
-                log.debug(f"{LOG_WEBUI_SEND} [{self._client_id}] {request.request_id} popped")
+                log.debug(
+                    f"{LOG_WEBUI_SEND} [{self._client_id}] {request.request_id} popped"
+                )
 
 
 # Initialize the request manager
@@ -386,7 +410,7 @@ async def handle_uiapi_request(
                 }
             )
 
-        response = await main_webui.await_response(request, timeout=30.0)
+        response = await main_webui.wait(request, timeout=30.0)
         log.info(f"Request completed successfully {request.request_id}")
         return web.json_response({"status": "ok", "response": response})
     except asyncio.TimeoutError:
@@ -441,23 +465,24 @@ async def uiapi_webui_ready(request):
     """Called when ComfyUI web interface connects"""
     print()
     data = await request.json()
-    client_id = data.get('client_id', '-1')
-    browser_info = data.get('browserInfo', {})
-    browser_name = browser_info.get('browser', 'Unknown Browser')
-    platform = browser_info.get('platform', 'Unknown Platform')
-    
+    client_id = data.get("client_id", "-1")
+    browser_info = data.get("browserInfo", {})
+    browser_name = browser_info.get("browser", "Unknown Browser")
+    platform = browser_info.get("platform", "Unknown Platform")
+
     # Get or create manager for this client
     print("")
     log.info("-> /uiapi/webui_ready")
 
     manager = WebuiManager.get_or_create_manager(client_id)
-    log.info(f"{LOG_WEBUI_CONNECT} [{manager.client_id}] - Hello from {browser_name} on {platform}!")
+    log.info(
+        f"{LOG_WEBUI_CONNECT} [{manager.client_id}] - Hello from {browser_name} on {platform}!"
+    )
     manager.set_connected()
 
     try:
         # Fetch current workflow using this manager since it just connected
-        request = await manager.send("get_workflow", wait_for_client=True)
-        workflow = await manager.await_response(request)
+        workflow = await manager.wsend("get_workflow", buffered=True)
 
         if workflow:
             workflow = workflow["workflow"]["workflow"]
@@ -466,7 +491,9 @@ async def uiapi_webui_ready(request):
             )
 
             console.print()
-            console.print(f"{BOLD}{BLUE}========== Workflow Analysis Results =========={RESET}")
+            console.print(
+                f"{BOLD}{BLUE}========== Workflow Analysis Results =========={RESET}"
+            )
             console.print(f"{LOG_MODEL} Total checkpoints found: {len(checkpoints)}")
 
             console.print(f"{LOG_MODEL} Missing models: {len(missing_models)}")
@@ -492,7 +519,7 @@ async def uiapi_webui_ready(request):
 async def uiapi_webui_disconnect(request):
     """Called when ComfyUI web interface disconnects"""
     data = await request.json()
-    client_id = data.get('client_id')
+    client_id = data.get("client_id")
     if client_id:
         manager = WebuiManager.get_or_create_manager(client_id)
         manager.set_disconnected()
@@ -504,12 +531,12 @@ async def uiapi_response(request):
     data = await request.json()
     request_id = data.get("request_id")
     client_id = data.get("client_id")
-    
+
     if not request_id:
         return web.json_response(
             {"status": "error", "error": "No request_id provided"}, status=400
         )
-        
+
     if not client_id:
         return web.json_response(
             {"status": "error", "error": "No client_id provided"}, status=400
@@ -532,12 +559,12 @@ async def process_workflow_response(response: Any) -> Any:
     elif isinstance(response, web.Response):
         # Get response text directly from the response object
         try:
-            if hasattr(response, 'text'):
+            if hasattr(response, "text"):
                 if callable(response.text):
                     response_text = await response.text()
                 else:
                     response_text = response.text
-                    
+
                 if isinstance(response_text, str):
                     response_data = json.loads(response_text)
                     if "workflow" in response_data:
@@ -560,28 +587,43 @@ async def uiapi_download_models(request):
         # Get the request data containing the download table
         request_data = await request.json()
         download_table = request_data.get("download_table", {})
-        workflow = request_data.get("workflow")
-
+        workflow = request_data.get("workflow", None)
+        
+        # Get workflow from main WebUI if not provided
+        # ----------------------------------------
         if not workflow:
-            log.info("/uiapi/download_models - No workflow provided")
-            return web.json_response(
-                {"status": "error", "error": "No workflow provided"}, status=400
-            )
+            log.info("/uiapi/download_models - No workflow provided, checking main WebUI")
+            main_webui = WebuiManager.get_main_webui()
+            if main_webui:
+                workflow = await main_webui.wsend("get_workflow", buffered=True)
+                if workflow:
+                    workflow = workflow["workflow"]["workflow"]
+                    log.info("/uiapi/download_models - Got workflow from main WebUI")
+                else:
+                    log.info("/uiapi/download_models - Failed to get workflow from main WebUI")
+                    return web.json_response(
+                        {"status": "error", "error": "No workflow available"}, status=400
+                    )
+            else:
+                log.info("/uiapi/download_models - No main WebUI available")
+                return web.json_response(
+                    {"status": "error", "error": "No workflow provided and no main WebUI available"}, status=400
+                )
 
-        # Generate unique task ID
+        # Create task
+        # ----------------------------------------
+
         task_id = str(uuid.uuid4())[:8]
-
-        # Initialize task info
-        log.info(f"{LOG_TASK_START} {task_id} - *")
         download_tasks[task_id] = {
             "status": "initializing",
             "start_time": time.time(),
             "progress": {},
             "completed": False,
         }
+        download_task = download_models_task(task_id, download_table, workflow)
+        asyncio.create_task(download_task)
 
-        # Start download task in background
-        asyncio.create_task(download_models_task(task_id, download_table, workflow))
+        log.info(f"{LOG_TASK_START} {task_id} - *")
 
         return web.json_response(
             {"status": "ok", "message": "Download task started", "download_id": task_id}
@@ -627,6 +669,13 @@ async def uiapi_get_workflow(request):
     print()
     log.info("-> /uiapi/get_workflow")
     return await handle_uiapi_request("get_workflow")
+
+
+@routes.post("/uiapi/get_workflow_api")
+async def uiapi_get_workflow_api(request):
+    print()
+    log.info("-> /uiapi/get_workflow_api")
+    return await handle_uiapi_request("get_workflow_api")
 
 
 @routes.post("/uiapi/get_fields")
@@ -741,6 +790,7 @@ async def download_models_task(
         checkpoints = []
         missing_ckpts = []
         existing_models = []
+        ckpt_types = {}
 
         task_info.update(
             {
@@ -749,37 +799,69 @@ async def download_models_task(
             }
         )
 
-        nodes = workflow["nodes"]
-        log.info(
-            f"{LOG_TASK_START} {task_id} - Extracted {len(nodes)} nodes from workflow"
-        )
+        # Read workflow nodes
+        # ----------------------------------------
+        def process_model_value(value, ntype, task_id):
+            """Process a single model value and update tracking data"""
+            if not (isinstance(value, str) and any(
+                value.endswith(ext) for ext in [".safetensors", ".ckpt", ".bin"]
+            )):
+                return None
+                
+            ckpt = value
+            name = ckpt.split("/")[-1]
+            
+            # Determine checkpoint type
+            if 'lora' in ntype or 'loraloader' in ntype:
+                ckpt_types[ckpt] = 'loras'
+            elif 'control' in ntype:
+                ckpt_types[ckpt] = 'controlnet'
+            else:
+                ckpt_types[ckpt] = 'checkpoints'
+
+            checkpoints.append(ckpt)
+            
+            # Check if model exists
+            if model_defs.has_model(ckpt, ckpt_types[ckpt]):
+                path = model_defs.get_model_path(ckpt, ckpt_types[ckpt])
+                log.info(
+                    f"{LOG_TASK} {task_id} - {GREEN} ✓ {ckpt_types[ckpt]}: {ckpt}{RESET}"
+                )
+                existing_models.append(ckpt)
+                task_info["progress"][value] = {
+                    "status": "success",
+                    "path": str(path),
+                    "model_number": "existing",
+                }
+            else:
+                missing_ckpts.append(ckpt)
+                log.info(
+                    f"{LOG_TASK} {task_id} - {RED} ✗ {ckpt_types[ckpt]}: {ckpt}{RESET}"
+                )
+
+        # 1) UI json format
+        nodes = workflow.get("nodes", [])
+        if nodes:
+            log.info(
+                f"{LOG_TASK_START} {task_id} - Extracted {len(nodes)} nodes from workflow"
+            )
         for node in nodes:
             if isinstance(node, dict) and "widgets_values" in node:
                 for value in node["widgets_values"]:
-                    if isinstance(value, str) and any(
-                        value.endswith(ext) for ext in [".safetensors", ".ckpt", ".bin"]
-                    ):
-                        ckpt = value
-                        name = ckpt.split("/")[-1]
+                    process_model_value(value, node["type"].lower(), task_id)
 
-                        checkpoints.append(ckpt)
-                        if model_defs.has_model(ckpt):
-                            path = model_defs.get_model_path(ckpt)
-                            log.info(
-                                f"{LOG_TASK} {task_id} - {GREEN} ✓ {node['type']}: {ckpt}{RESET}"
-                            )
-                            existing_models.append(ckpt)
-                            task_info["progress"][value] = {
-                                "status": "success",
-                                "path": str(path),
-                                "model_number": "existing",
-                            }
-                        else:
-                            missing_ckpts.append(ckpt)
-                            log.info(
-                                f"{LOG_TASK} {task_id} - {RED} ✗ {node['type']}: {ckpt}{RESET}"
-                            )
+        # 2) API json format
+        if not nodes and isinstance(workflow, dict):
+            log.info(f"{LOG_TASK_START} {task_id} - Processing alternate workflow format")
+            for node_id, node_data in workflow.items():
+                if isinstance(node_data, dict):
+                    # Check inputs for model paths
+                    inputs = node_data.get('inputs', {})
+                    for key, value in inputs.items():
+                        process_model_value(value, node_data.get('class_type', '').lower(), task_id)
 
+        # Tally models
+        # ----------------------------------------
         total_models = len(missing_ckpts)
         if total_models == 0:
             log.info(
@@ -796,7 +878,9 @@ async def download_models_task(
 
         # Download models
         # ----------------------------------------
-        log.info(f"{LOG_TASK_START} {task_id} - Found {total_models} models to download")
+        log.info(
+            f"{LOG_TASK_START} {task_id} - Found {total_models} models to download"
+        )
 
         task_info.update(
             {
@@ -814,25 +898,24 @@ async def download_models_task(
 
         # Get URLs from client not in the download map
         urlmap_both = {**urlmap_store, **urlmap_request}
-        nourl_ckpts = [ ckpt for ckpt in missing_ckpts if ckpt not in urlmap_both]
+        nourl_ckpts = [ckpt for ckpt in missing_ckpts if ckpt not in urlmap_both]
         hasurl_ckpts = [ckpt for ckpt in missing_ckpts if ckpt in urlmap_both]
-        if len(nourl_ckpts) > 0:
+        webui = WebuiManager.get_main_webui()
+        if len(nourl_ckpts) > 0 and webui is not None:
             log.info(
                 f"{LOG_TASK_START} {task_id} - Requesting urlmap from webui for {len(nourl_ckpts)} models ..."
             )
-            request = await webui_manager.send(
+            request = await webui.wsend(
                 "get_model_url",
                 {
                     "requested_ckpts": nourl_ckpts,
                     "existing_ckpts": hasurl_ckpts,
                 },
-                wait_for_client=True,
+                buffered=True,
             )
 
             # Wait for response from webui
-            urlmap_webui = await webui_manager.await_response(
-                request, timeout=INF_TIMEOUT
-            )
+            urlmap_webui = await webui.wait(request, timeout=INF_TIMEOUT)
             if not urlmap_webui:
                 urlmap_webui = {}
                 log.warning(
@@ -853,7 +936,7 @@ async def download_models_task(
                 )
 
                 # Use combined URL map for downloads
-                urlmap = {**urlmap_store, **urlmap_webui}
+                urlmap = {**urlmap_store, **urlmap_request, **urlmap_webui}
         else:
             urlmap = {**urlmap_store, **urlmap_request}
 
@@ -888,7 +971,7 @@ async def download_models_task(
                     )
                     continue
 
-                path = model_def.download(ckpt)
+                path = model_def.download(ckpt, type=ckpt_types[ckpt])
                 task_info["progress"][ckpt].update(
                     {"status": "success", "path": str(path)}
                 )
@@ -916,7 +999,7 @@ async def download_models_task(
 async def uiapi_connection_status(request):
     """Check if ComfyUI web interface is connected and get system status"""
     try:
-        client_id = request.query.get('client_id')
+        client_id = request.query.get("client_id")
         if client_id:
             manager = WebuiManager.get_or_create_manager(client_id)
             status = {
@@ -953,7 +1036,7 @@ async def uiapi_client_disconnect(request):
     """Handle explicit client disconnect notification"""
     try:
         data = await request.json()
-        client_id = data.get('client_id')
+        client_id = data.get("client_id")
         if client_id:
             manager = WebuiManager.get_or_create_manager(client_id)
             manager.set_disconnected()
@@ -1039,6 +1122,9 @@ async def uiapi_model_status(request):
 @routes.post("/uiapi/get_model_url")
 async def uiapi_get_model_url(request):
     """Handle requests to get a model's download URL"""
+    webui = WebuiManager.get_main_webui()
+    assert webui is not None
+
     try:
         data = await request.json()
         ckpt_name = data.get("ckpt_name")
@@ -1054,10 +1140,10 @@ async def uiapi_get_model_url(request):
                     {"status": "error", "error": "ckpt_names must be a list"},
                     status=400,
                 )
-            request = await webui_manager.send(
-                "get_model_url", {"ckpt_names": ckpt_names}, wait_for_client=True
+            request = await webui.wsend(
+                "get_model_url", {"ckpt_names": ckpt_names}, buffered=True
             )
-            response = await webui_manager.await_response(request, timeout=INF_TIMEOUT)
+            response = await webui.wait(request, timeout=INF_TIMEOUT)
 
             # Save URLs to persistent storage
             if response:
@@ -1071,12 +1157,12 @@ async def uiapi_get_model_url(request):
             return web.json_response({"status": "ok", "urls": response})
         elif ckpt_name:
             # Create a request to get URL from webui
-            request = await webui_manager.send(
-                "get_model_url", {"ckpt_name": ckpt_name}, wait_for_client=True
+            request = await webui.wsend(
+                "get_model_url", {"ckpt_name": ckpt_name}, buffered=True
             )
 
             # Wait for response from webui
-            response = await webui_manager.await_response(request, timeout=INF_TIMEOUT)
+            response = await webui.wait(request, timeout=INF_TIMEOUT)
 
             if not response or not response.get("url"):
                 return web.json_response(
@@ -1124,15 +1210,19 @@ async def uiapi_send_workflow(request):
             )
 
         # Get all connected WebUI managers
-        connected_managers = [m for m in WebuiManager._client_managers.values() if m._webui_ready.is_set()]
-        
+        connected_managers = [
+            m for m in WebuiManager._client_managers.values() if m._webui_ready.is_set()
+        ]
+
         if not connected_managers:
             return web.json_response(
                 {"status": "error", "error": "No WebUI clients connected"}, status=400
             )
 
-        log.info(f"Sending workflow dialog to {len(connected_managers)} connected WebUIs")
-        
+        log.info(
+            f"Sending workflow dialog to {len(connected_managers)} connected WebUIs"
+        )
+
         # Send to all connected WebUIs and wait for first accept
         responses = []
         for manager in connected_managers:
@@ -1140,34 +1230,34 @@ async def uiapi_send_workflow(request):
                 # Create a request to show dialog in webui
                 request = await manager.send(
                     "show_workflow_dialog",
-                    {
-                        "workflow": workflow,
-                        "message": message,
-                        "title": title
-                    },
-                    wait_for_client=True
+                    {"workflow": workflow, "message": message, "title": title},
+                    buffered=True,
                 )
 
                 # Wait for user response
-                response = await manager.await_response(request, timeout=INF_TIMEOUT)
+                response = await manager.wait(request, timeout=INF_TIMEOUT)
                 if response and response.get("accepted", False):
                     # If any WebUI accepts, return success
-                    return web.json_response({
-                        "status": "ok",
-                        "accepted": True,
-                        "message": response.get("message", "")
-                    })
+                    return web.json_response(
+                        {
+                            "status": "ok",
+                            "accepted": True,
+                            "message": response.get("message", ""),
+                        }
+                    )
                 responses.append(response)
             except Exception as e:
                 log.error(f"Error sending to WebUI {manager.client_id}: {e}")
                 responses.append(None)
 
         # If we get here, either all rejected or errored
-        return web.json_response({
-            "status": "ok",
-            "accepted": False,
-            "message": "Workflow was rejected by all WebUIs"
-        })
+        return web.json_response(
+            {
+                "status": "ok",
+                "accepted": False,
+                "message": "Workflow was rejected by all WebUIs",
+            }
+        )
 
     except Exception as e:
         log.error(f"Error sending workflow: {e}")
@@ -1175,3 +1265,59 @@ async def uiapi_send_workflow(request):
         return web.json_response({"status": "error", "error": str(e)}, status=500)
 
 
+@routes.post("/uiapi/clear_nonexistant_models")
+async def uiapi_clear_nonexistant_models(request):
+    """Clear widget values for models that don't exist on disk"""
+    print()
+    log.info("-> /uiapi/clear_nonexistant_models")
+    webui = WebuiManager.get_main_webui()
+    assert webui is not None
+
+    try:
+        workflow = await webui.wsend("get_workflow", buffered=True)
+        nodes = workflow["workflow"]
+
+        fields_to_clear = []
+
+        # Analyze each node's widgets for non-existent models
+        for node in nodes:
+            if isinstance(node, dict) and "widgets_values" in node:
+                for idx, value in enumerate(node["widgets_values"]):
+                    if isinstance(value, str) and any(
+                        value.endswith(ext) for ext in [".safetensors", ".ckpt", ".bin"]
+                    ):
+                        if not model_defs.has_model(value):
+                            # Format: [node_id.widget_index, ""]
+                            fields_to_clear.append([f"{node['id']}.{idx}", ""])
+
+        if not fields_to_clear:
+            return web.json_response(
+                {
+                    "status": "ok",
+                    "message": "No non-existent models found to clear",
+                    "cleared_count": 0,
+                }
+            )
+
+        # Send set_fields request to clear the values
+        request = await webui_manager.send(
+            "set_fields", {"fields": fields_to_clear}, buffered=True
+        )
+
+        # Wait for response
+        response = await webui_manager.wait(request)
+
+        return web.json_response(
+            {
+                "status": "ok",
+                "message": f"Cleared {len(fields_to_clear)} non-existent model values",
+                "cleared_count": len(fields_to_clear),
+                "cleared_fields": fields_to_clear,
+                "set_fields_response": response,
+            }
+        )
+
+    except Exception as e:
+        log.error(f"Error clearing non-existent models: {e}")
+        log.error(traceback.format_exc())
+        return web.json_response({"status": "error", "error": str(e)}, status=500)

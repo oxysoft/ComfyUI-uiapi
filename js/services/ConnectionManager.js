@@ -119,6 +119,9 @@ export class ConnectionManager {
      * @private
      */
     async notifyServerConnection() {
+        if (clientId === -1) 
+            return;
+
         try {
             const response = await api.fetchApi('/uiapi/webui_ready', {
                 method: 'POST',
@@ -140,6 +143,9 @@ export class ConnectionManager {
      * @private
      */
     async notifyServerDisconnect() {
+        if (clientId === -1) 
+            return;
+
         try {
             await api.fetchApi("/uiapi/client_disconnect", {
                 method: "POST"
