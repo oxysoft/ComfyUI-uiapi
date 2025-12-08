@@ -1,3 +1,18 @@
+"""
+DEPRECATED: This file is kept for backwards compatibility only.
+
+The actively maintained client is now in the 'client' submodule:
+    from client.comfy_uiapi_client import ComfyClient
+
+Or install from PyPI:
+    pip install comfy-uiapi-client
+
+Then:
+    from comfy_uiapi_client import ComfyClient
+
+Repository: https://github.com/holo-q/comfy-uiapi-client
+"""
+
 import asyncio
 import base64
 import io
