@@ -1,5 +1,6 @@
 import { api } from "../../../scripts/api.js";
 import { app } from "../../../scripts/app.js";
+import { getClientId } from "./ApiHandlers.js";
 
 /**
  * Class managing WebSocket connection and heartbeat
@@ -48,11 +49,22 @@ export class ConnectionManager {
             await this.notifyServerDisconnect();
         });
 
-        // Handle page unload
-        window.addEventListener('beforeunload', async () => {
+        // Handle page unload - use sendBeacon for reliable unload notification
+        // async/await is unreliable during page unload as the browser may kill the process
+        window.addEventListener('beforeunload', () => {
             console.log("[ConnectionManager] Page unloading - Cleaning up...");
             this.stopHeartbeat();
-            await this.notifyServerDisconnect();
+
+            // Use sendBeacon for reliable delivery during page unload
+            const clientId = getClientId();
+            if (clientId !== "-1") {
+                const blob = new Blob(
+                    [JSON.stringify({ client_id: clientId })],
+                    { type: 'application/json' }
+                );
+                // sendBeacon queues the request to complete even after page unloads
+                navigator.sendBeacon('/uiapi/client_disconnect', blob);
+            }
         });
     }
 
@@ -119,7 +131,7 @@ export class ConnectionManager {
      * @private
      */
     async notifyServerConnection() {
-        if (clientId === -1) 
+        if (getClientId() === "-1")
             return;
 
         try {
@@ -143,7 +155,7 @@ export class ConnectionManager {
      * @private
      */
     async notifyServerDisconnect() {
-        if (clientId === -1) 
+        if (getClientId() === "-1")
             return;
 
         try {

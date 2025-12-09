@@ -317,7 +317,8 @@ class ModelDef:
         ]
         for path in paths:
             if os.path.exists(path):
-                return open(path).read().strip()
+                with open(path) as f:
+                    return f.read().strip()
         return None
 
 

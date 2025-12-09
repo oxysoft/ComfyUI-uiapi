@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from rich.logging import RichHandler
 from rich.console import Console
 from rich.traceback import install
+import aiofiles
 
 # ANSI color codes
 # Regular colors
@@ -82,28 +83,30 @@ from server import PromptServer
 
 # Path to store model URLs
 MODEL_URLS_PATH = Path(__file__).parent / "model_urls.json"
-INF_TIMEOUT = 99999999999
+# Reasonable timeout for user interaction (5 minutes)
+DEFAULT_TIMEOUT = 300.0
 
-def load_stored_urlmap() -> Dict[str, str]:
-    """Load saved model URLs from JSON file"""
+async def load_stored_urlmap() -> Dict[str, str]:
+    """Load saved model URLs from JSON file (async)"""
     if MODEL_URLS_PATH.exists():
         try:
-            with open(MODEL_URLS_PATH, "r") as f:
-                return json.load(f)
+            async with aiofiles.open(MODEL_URLS_PATH, "r") as f:
+                content = await f.read()
+                return json.loads(content)
         except Exception as e:
             log.error(f"Error loading model URLs: {e}")
     return {}
 
 
-def save_model_urls(urls: Dict[str, str]) -> None:
-    """Save model URLs to JSON file, merging with existing URLs"""
+async def save_model_urls(urls: Dict[str, str]) -> None:
+    """Save model URLs to JSON file, merging with existing URLs (async)"""
     try:
-        existing_urls = load_stored_urlmap()
+        existing_urls = await load_stored_urlmap()
         merged_urls = {**existing_urls, **urls}
 
         os.makedirs(MODEL_URLS_PATH.parent, exist_ok=True)
-        with open(MODEL_URLS_PATH, "w") as f:
-            json.dump(merged_urls, f, indent=2)
+        async with aiofiles.open(MODEL_URLS_PATH, "w") as f:
+            await f.write(json.dumps(merged_urls, indent=2))
 
         log.info(f"Saved {len(merged_urls)} model URLs ({len(urls)} new/updated)")
     except Exception as e:
@@ -182,6 +185,7 @@ class WebuiManager:
         self._webui_ready = asyncio.Event()
         self._buffered_requests: list[PendingRequest] = []
         self._lock = asyncio.Lock()
+        self._disconnected = False  # Track disconnection state
         log.info(f"{LOG_WEBUI_CONNECT} - *")
 
     @property
@@ -242,10 +246,24 @@ class WebuiManager:
 
         self._buffered_requests.clear()
 
-    def set_disconnected(self):
+    async def set_disconnected(self):
         """Called when ComfyUI web interface disconnects"""
         log.warning(f"{LOG_WEBUI_DISCONNECT} [{self._client_id}]")
+
+        # Mark as disconnected first to prevent new requests
+        self._disconnected = True
         self._webui_ready.clear()
+
+        # Cancel all pending requests gracefully
+        async with self._lock:
+            for request_id, request in list(self._pending_requests.items()):
+                if not request.event.is_set():
+                    log.warning(f"{LOG_WEBUI_DISCONNECT} [{self._client_id}] Cancelling pending request {request_id}")
+                    request.response = {"status": "error", "error": "Client disconnected"}
+                    request.event.set()
+            # Clear pending requests
+            self._pending_requests.clear()
+            self._buffered_requests.clear()
 
         # If this was the main WebUI, try to find another connected one
         if self.__class__._main_webui == self:
@@ -258,8 +276,16 @@ class WebuiManager:
                     self.__class__._main_webui = manager
                     break
 
+        # Schedule cleanup for later (avoid deleting while iterating)
+        if self._client_id in self._client_managers:
+            asyncio.create_task(self._cleanup_manager())
+
+    async def _cleanup_manager(self):
+        """Delayed cleanup of manager from global dict"""
+        await asyncio.sleep(0.1)  # Small delay to ensure all operations complete
         if self._client_id in self._client_managers:
             del self._client_managers[self._client_id]
+            log.debug(f"{LOG_WEBUI_DISCONNECT} [{self._client_id}] Manager cleaned up")
 
     async def _send(self, request: PendingRequest):
         """Send a request to the client"""
@@ -426,6 +452,23 @@ async def handle_uiapi_request(
 
 # Track ongoing downloads
 download_tasks: Dict[str, Dict[str, Any]] = {}
+# Cleanup old completed tasks older than 1 hour
+TASK_CLEANUP_AGE = 3600  # 1 hour in seconds
+
+def cleanup_old_tasks():
+    """Remove completed download tasks older than 1 hour"""
+    current_time = time.time()
+    tasks_to_remove = []
+
+    for task_id, task_info in download_tasks.items():
+        if task_info.get("completed") and (current_time - task_info.get("start_time", current_time)) > TASK_CLEANUP_AGE:
+            tasks_to_remove.append(task_id)
+
+    for task_id in tasks_to_remove:
+        del download_tasks[task_id]
+
+    if tasks_to_remove:
+        log.debug(f"Cleaned up {len(tasks_to_remove)} old download tasks")
 
 
 def analyze_workflow_models(workflow: dict) -> Tuple[List[str], List[str], List[str]]:
@@ -522,7 +565,7 @@ async def uiapi_webui_disconnect(request):
     client_id = data.get("client_id")
     if client_id:
         manager = WebuiManager.get_or_create_manager(client_id)
-        manager.set_disconnected()
+        await manager.set_disconnected()
     return web.json_response({"status": "ok"})
 
 
@@ -578,6 +621,37 @@ async def process_workflow_response(response: Any) -> Any:
 # Add this near other global variables
 pending_downloads: Dict[str, Dict] = {}
 
+def cleanup_old_pending_downloads():
+    """Remove pending downloads older than 1 hour"""
+    current_time = time.time()
+    to_remove = []
+
+    for request_id, info in pending_downloads.items():
+        if current_time - info.get("timestamp", current_time) > TASK_CLEANUP_AGE:
+            to_remove.append(request_id)
+
+    for request_id in to_remove:
+        del pending_downloads[request_id]
+
+    if to_remove:
+        log.debug(f"Cleaned up {len(to_remove)} old pending downloads")
+
+
+def _handle_task_exception(task: asyncio.Task, task_id: str):
+    """Handle exceptions from background tasks"""
+    try:
+        task.result()  # This will raise if task had an exception
+    except Exception as e:
+        log.error(f"{LOG_TASK_END} {task_id} - Unhandled exception: {e}")
+        log.error(traceback.format_exc())
+        # Update task status
+        if task_id in download_tasks:
+            download_tasks[task_id].update({
+                "status": "error",
+                "error": str(e),
+                "completed": True,
+            })
+
 
 @routes.post("/uiapi/download_models")
 async def uiapi_download_models(request):
@@ -621,7 +695,9 @@ async def uiapi_download_models(request):
             "completed": False,
         }
         download_task = download_models_task(task_id, download_table, workflow)
-        asyncio.create_task(download_task)
+        task = asyncio.create_task(download_task)
+        # Add exception handler to catch unhandled task exceptions
+        task.add_done_callback(lambda t: _handle_task_exception(t, task_id))
 
         log.info(f"{LOG_TASK_START} {task_id} - *")
 
@@ -641,21 +717,17 @@ async def uiapi_download_status(request):
     request_id = request.match_info["request_id"]
     log.info(f"-> /uiapi/download_status/{request_id}")
 
+    # Periodic cleanup of old entries
+    cleanup_old_pending_downloads()
+    cleanup_old_tasks()
+
     # First check pending downloads
     if request_id in pending_downloads:
-        # Clean up old pending downloads (older than 5 minutes)
-        current_time = time.time()
-        for rid, info in list(pending_downloads.items()):
-            if current_time - info["timestamp"] > 300:  # 5 minutes
-                pending_downloads.pop(rid)
-
-        # Return status if still pending
-        if request_id in pending_downloads:
-            info = pending_downloads[request_id]
-            # If task_id is set, redirect to that status
-            if info["task_id"]:
-                return web.json_response(download_tasks[info["task_id"]])
-            return web.json_response(info)
+        info = pending_downloads[request_id]
+        # If task_id is set, redirect to that status
+        if info.get("task_id"):
+            return web.json_response(download_tasks[info["task_id"]])
+        return web.json_response(info)
 
     # Then check active download tasks
     if request_id in download_tasks:
@@ -891,7 +963,7 @@ async def download_models_task(
         )
 
         # Load saved URLs
-        urlmap_store = load_stored_urlmap()
+        urlmap_store = await load_stored_urlmap()
         log.info(
             f"{LOG_TASK_START} {task_id} - Loaded {len(urlmap_store)} saved model URLs"
         )
@@ -914,8 +986,8 @@ async def download_models_task(
                 buffered=True,
             )
 
-            # Wait for response from webui
-            urlmap_webui = await webui.wait(request, timeout=INF_TIMEOUT)
+            # Wait for response from webui (use longer timeout for model URL lookup)
+            urlmap_webui = await webui.wait(request, timeout=DEFAULT_TIMEOUT)
             if not urlmap_webui:
                 urlmap_webui = {}
                 log.warning(
@@ -930,7 +1002,7 @@ async def download_models_task(
                         urlmap_store[name] = urlmap_webui[name]
 
                 # Save updated URLs
-                save_model_urls(urlmap_store)
+                await save_model_urls(urlmap_store)
                 log.info(
                     f"{LOG_TASK_END} {task_id} - Saved {len(urlmap_store)} new model URLs"
                 )
@@ -1039,7 +1111,7 @@ async def uiapi_client_disconnect(request):
         client_id = data.get("client_id")
         if client_id:
             manager = WebuiManager.get_or_create_manager(client_id)
-            manager.set_disconnected()
+            await manager.set_disconnected()
         return web.json_response({"status": "ok"})
     except Exception as e:
         log.error(f"Error handling client disconnect: {e}")
@@ -1143,15 +1215,15 @@ async def uiapi_get_model_url(request):
             request = await webui.wsend(
                 "get_model_url", {"ckpt_names": ckpt_names}, buffered=True
             )
-            response = await webui.wait(request, timeout=INF_TIMEOUT)
+            response = await webui.wait(request, timeout=DEFAULT_TIMEOUT)
 
             # Save URLs to persistent storage
             if response:
-                saved_urls = load_stored_urlmap()
+                saved_urls = await load_stored_urlmap()
                 for name, url in response.items():
                     if url:  # Only save non-empty URLs
                         saved_urls[name] = url
-                save_model_urls(saved_urls)
+                await save_model_urls(saved_urls)
                 log.info(f"Saved {len(response)} model URLs")
 
             return web.json_response({"status": "ok", "urls": response})
@@ -1162,7 +1234,7 @@ async def uiapi_get_model_url(request):
             )
 
             # Wait for response from webui
-            response = await webui.wait(request, timeout=INF_TIMEOUT)
+            response = await webui.wait(request, timeout=DEFAULT_TIMEOUT)
 
             if not response or not response.get("url"):
                 return web.json_response(
@@ -1170,9 +1242,9 @@ async def uiapi_get_model_url(request):
                 )
 
             # Save URL to persistent storage
-            saved_urls = load_stored_urlmap()
+            saved_urls = await load_stored_urlmap()
             saved_urls[ckpt_name] = response["url"]
-            save_model_urls(saved_urls)
+            await save_model_urls(saved_urls)
             log.info(f"-> /uiapi/get_model_url: saved URL for model {ckpt_name}")
 
             return web.json_response(
@@ -1235,7 +1307,7 @@ async def uiapi_send_workflow(request):
                 )
 
                 # Wait for user response
-                response = await manager.wait(request, timeout=INF_TIMEOUT)
+                response = await manager.wait(request, timeout=DEFAULT_TIMEOUT)
                 if response and response.get("accepted", False):
                     # If any WebUI accepts, return success
                     return web.json_response(

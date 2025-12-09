@@ -13,13 +13,40 @@ export function setClientId(id) {
     console.log("[ApiHandlers] Client ID set to:", id);
 }
 
+export function getClientId() {
+    return clientId;
+}
+
+/**
+ * Safe wrapper for async handlers with error handling
+ * @param {Function} handler - Async handler function
+ * @param {CustomEvent} event - Event object
+ */
+async function safeHandleRequest(handler, event) {
+    const { request_id } = event.detail;
+    try {
+        await handler(event);
+    } catch (error) {
+        console.error(`[ApiHandlers] Error in handler:`, error);
+        try {
+            // Attempt to send error response back to server
+            await postResponse({
+                error: true,
+                message: error.message || String(error)
+            }, request_id);
+        } catch (responseError) {
+            console.error("[ApiHandlers] Failed to send error response:", responseError);
+        }
+    }
+}
+
 /**
  * Post a response to the API
  * @param {Object} object - Response object
  * @param {string} requestId - Request ID
  */
 async function postResponse(object, requestId) {
-    await api.fetchApi("/uiapi/webui_response", {
+    const response = await api.fetchApi("/uiapi/webui_response", {
         method: "POST",
         body: JSON.stringify({
             response: object ?? {},
@@ -27,6 +54,13 @@ async function postResponse(object, requestId) {
             client_id: clientId
         })
     });
+
+    if (!response.ok) {
+        const errorText = await response.text().catch(() => "Unable to read error response");
+        console.error("[ApiHandlers] Failed to post response:", response.status, errorText);
+        throw new Error(`Failed to post response: ${response.status} ${errorText}`);
+    }
+
     console.log("[ApiHandlers] Posted response", object ?? {}, "request_id:", requestId, "client_id:", clientId);
 }
 
@@ -255,45 +289,17 @@ export async function handleShowWorkflowDialog(event) {
  */
 export function registerApiHandlers() {
     console.log("[ApiHandlers] registerApiHandlers")
-    api.addEventListener("/uiapi/get_workflow", handleGetWorkflow);
-    api.addEventListener("/uiapi/get_workflow_api", handleGetWorkflowApi);
-    api.addEventListener("/uiapi/get_field", handleGetFields);
-    api.addEventListener("/uiapi/get_fields", handleGetFields);
-    api.addEventListener("/uiapi/set_fields", handleSetFields);
-    api.addEventListener("/uiapi/set_connection", handleSetConnection);
-    api.addEventListener("/uiapi/execute", handleExecute);
-    api.addEventListener("/uiapi/query_fields", handleQueryFields);
-    api.addEventListener("/uiapi/get_model_url", handleGetModelUrl);
-    api.addEventListener("/uiapi/show_workflow_dialog", handleShowWorkflowDialog);
-
-    // Send initial ready signal with browser info
-    api.fetchApi("/uiapi/webui_ready", {
-        method: "POST",
-        body: JSON.stringify({
-            client_id: clientId,
-            browserInfo: {
-                browser: navigator.userAgent,
-                platform: navigator.platform
-            }
-        })
-    }).then(async response => {
-        const data = await response.json();
-        if (data.client_id) {
-            setClientId(data.client_id);
-        }
-    }).catch(err => {
-        console.error("[ApiHandlers] Error during webui_ready:", err);
-    });
-
-    // Handle disconnect
-    window.addEventListener('beforeunload', () => {
-        api.fetchApi("/uiapi/webui_disconnect", {
-            method: "POST",
-            body: JSON.stringify({ client_id: clientId })
-        }).catch(() => {
-            // Ignore errors during page unload
-        });
-    });
+    // Wrap all handlers with error handling
+    api.addEventListener("/uiapi/get_workflow", (e) => safeHandleRequest(handleGetWorkflow, e));
+    api.addEventListener("/uiapi/get_workflow_api", (e) => safeHandleRequest(handleGetWorkflowApi, e));
+    api.addEventListener("/uiapi/get_field", (e) => safeHandleRequest(handleGetFields, e));
+    api.addEventListener("/uiapi/get_fields", (e) => safeHandleRequest(handleGetFields, e));
+    api.addEventListener("/uiapi/set_fields", (e) => safeHandleRequest(handleSetFields, e));
+    api.addEventListener("/uiapi/set_connection", (e) => safeHandleRequest(handleSetConnection, e));
+    api.addEventListener("/uiapi/execute", (e) => safeHandleRequest(handleExecute, e));
+    api.addEventListener("/uiapi/query_fields", (e) => safeHandleRequest(handleQueryFields, e));
+    api.addEventListener("/uiapi/get_model_url", (e) => safeHandleRequest(handleGetModelUrl, e));
+    api.addEventListener("/uiapi/show_workflow_dialog", (e) => safeHandleRequest(handleShowWorkflowDialog, e));
 
     console.log("[ApiHandlers] ✓ All handlers registered");
 } 
