@@ -131,17 +131,26 @@ export class ConnectionManager {
      * @private
      */
     async notifyServerConnection() {
-        if (getClientId() === "-1")
-            return;
-
         try {
+            // Import setClientId here to avoid circular dependency at module load
+            const { setClientId } = await import('./ApiHandlers.js');
+
             const response = await api.fetchApi('/uiapi/webui_ready', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ browserInfo: this.browserInfo })
+                body: JSON.stringify({
+                    browserInfo: this.browserInfo,
+                    client_id: getClientId()  // Send current ID (may be "-1" on fresh start)
+                })
             });
-            
+
             if (response.ok) {
+                const data = await response.json();
+                // Server assigns/confirms client_id - store it
+                if (data.client_id && data.client_id !== "-1") {
+                    setClientId(data.client_id);
+                    console.log("[ConnectionManager] Client ID set to:", data.client_id);
+                }
                 this.setConnected();
                 console.log("[ConnectionManager] Server notified of connection");
             }
