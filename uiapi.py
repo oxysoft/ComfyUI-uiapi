@@ -1337,6 +1337,62 @@ async def uiapi_send_workflow(request):
         return web.json_response({"status": "error", "error": str(e)}, status=500)
 
 
+@routes.post("/uiapi/load_workflow")
+async def uiapi_load_workflow(request):
+    """Load a workflow into the connected WebUI without confirmation dialog.
+
+    Use this when you want to programmatically load an API-format workflow
+    into the browser for visual editing/execution via uiapi.
+    """
+    print("")
+    log.info("-> /uiapi/load_workflow")
+    try:
+        data = await request.json()
+        workflow = data.get("workflow")
+
+        if not workflow:
+            return web.json_response(
+                {"status": "error", "error": "No workflow provided"}, status=400
+            )
+
+        # Get main WebUI manager
+        manager = WebuiManager.get_main_webui()
+        if not manager or not manager._webui_ready.is_set():
+            return web.json_response(
+                {"status": "error", "error": "No WebUI connected"}, status=400
+            )
+
+        log.info(f"Loading workflow into WebUI client {manager.client_id}")
+
+        # Send load request to browser
+        request_obj = await manager.send(
+            "load_workflow",
+            {"workflow": workflow},
+            buffered=True,
+        )
+
+        # Wait for confirmation
+        response = await manager.wait(request_obj, timeout=DEFAULT_TIMEOUT)
+
+        if response and response.get("loaded", False):
+            return web.json_response({
+                "status": "ok",
+                "loaded": True,
+                "message": response.get("message", "Workflow loaded"),
+            })
+        else:
+            return web.json_response({
+                "status": "error",
+                "loaded": False,
+                "error": response.get("message", "Failed to load workflow") if response else "No response from WebUI",
+            }, status=400)
+
+    except Exception as e:
+        log.error(f"Error loading workflow: {e}")
+        log.error(traceback.format_exc())
+        return web.json_response({"status": "error", "error": str(e)}, status=500)
+
+
 @routes.post("/uiapi/clear_nonexistant_models")
 async def uiapi_clear_nonexistant_models(request):
     """Clear widget values for models that don't exist on disk"""

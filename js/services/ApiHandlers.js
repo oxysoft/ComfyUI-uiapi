@@ -285,6 +285,35 @@ export async function handleShowWorkflowDialog(event) {
 }
 
 /**
+ * Handle load workflow request (no confirmation dialog)
+ * @param {CustomEvent} event - Event object
+ */
+export async function handleLoadWorkflow(event) {
+    await handleRequest(event);
+    const { workflow, request_id } = event.detail;
+
+    try {
+        // Clear current graph
+        app.graph.clear();
+
+        // Load new workflow - ComfyUI handles API format and auto-layout
+        await app.loadGraphData(workflow);
+
+        console.log("[ApiHandlers] Workflow loaded successfully");
+        await postResponse({
+            loaded: true,
+            message: "Workflow loaded"
+        }, request_id);
+    } catch (error) {
+        console.error("[ApiHandlers] Error loading workflow:", error);
+        await postResponse({
+            loaded: false,
+            message: "Error loading workflow: " + error.message
+        }, request_id);
+    }
+}
+
+/**
  * Register all API event handlers
  */
 export function registerApiHandlers() {
@@ -300,6 +329,7 @@ export function registerApiHandlers() {
     api.addEventListener("/uiapi/query_fields", (e) => safeHandleRequest(handleQueryFields, e));
     api.addEventListener("/uiapi/get_model_url", (e) => safeHandleRequest(handleGetModelUrl, e));
     api.addEventListener("/uiapi/show_workflow_dialog", (e) => safeHandleRequest(handleShowWorkflowDialog, e));
+    api.addEventListener("/uiapi/load_workflow", (e) => safeHandleRequest(handleLoadWorkflow, e));
 
     console.log("[ApiHandlers] ✓ All handlers registered");
 } 
